@@ -27,11 +27,13 @@ const BASS_DATA_FFT2048: Dword = 0x80000002;
 const EQ_BANDS: usize = 32;
 const VISUAL_BANDS: usize = 256;
 const VISUAL_PCM_SAMPLES: usize = 4096;
+const VISUAL_PCM_STEREO_SAMPLES: usize = VISUAL_PCM_SAMPLES * 2;
 
 struct VisualAnalysis {
     spectrum: [f32; VISUAL_BANDS],
     raw_spectrum: [f32; VISUAL_BANDS],
     pcm: [f32; VISUAL_PCM_SAMPLES],
+    pcm_stereo: [f32; VISUAL_PCM_STEREO_SAMPLES],
     raw_pcm: [f32; VISUAL_PCM_SAMPLES],
     pcm_len: usize,
     pcm_write: usize,
@@ -48,6 +50,7 @@ impl VisualAnalysis {
             spectrum: [0.0; VISUAL_BANDS],
             raw_spectrum: [0.0; VISUAL_BANDS],
             pcm: [0.0; VISUAL_PCM_SAMPLES],
+            pcm_stereo: [0.0; VISUAL_PCM_STEREO_SAMPLES],
             raw_pcm: [0.0; VISUAL_PCM_SAMPLES],
             pcm_len: 0,
             pcm_write: 0,
@@ -1119,6 +1122,7 @@ impl NativeAudioEngine {
                     visual.spectrum.fill(0.0);
                     visual.raw_spectrum.fill(0.0);
                     visual.pcm.fill(0.0);
+                    visual.pcm_stereo.fill(0.0);
                     visual.raw_pcm.fill(0.0);
                     visual.pcm_len = 0;
                     visual.pcm_write = 0;
@@ -1659,7 +1663,9 @@ impl NativeAudioEngine {
         };
         let frames = samples.len() / 2;
         for frame in 0..frames {
-            let mono = ((samples[frame * 2] + samples[frame * 2 + 1]) * 0.5).clamp(-1.0, 1.0);
+            let left = samples[frame * 2].clamp(-1.0, 1.0);
+            let right = samples[frame * 2 + 1].clamp(-1.0, 1.0);
+            let mono = ((left + right) * 0.5).clamp(-1.0, 1.0);
             if raw {
                 let write = visual.raw_pcm_write;
                 visual.raw_pcm[write] = mono;
@@ -1667,6 +1673,9 @@ impl NativeAudioEngine {
             } else {
                 let write = visual.pcm_write;
                 visual.pcm[write] = mono;
+                let stereo_write = write * 2;
+                visual.pcm_stereo[stereo_write] = left;
+                visual.pcm_stereo[stereo_write + 1] = right;
                 visual.pcm_write = (write + 1) % VISUAL_PCM_SAMPLES;
             }
         }
@@ -1950,23 +1959,27 @@ impl NativeAudioEngine {
         out
     }
 
-    fn projectm_pcm(&self, count_per_channel: usize) -> Vec<f32> {
+    fn projectm_pcm_stereo(&self, count_per_channel: usize) -> Vec<f32> {
         let count = count_per_channel.clamp(64, VISUAL_PCM_SAMPLES);
         let visual = match self.visual.lock() {
             Ok(visual) => visual,
-            Err(_) => return vec![0.0; count],
+            Err(_) => return vec![0.0; count * 2],
         };
         if visual.pcm_len == 0 {
-            return vec![0.0; count];
+            return vec![0.0; count * 2];
         }
         let available = visual.pcm_len.min(VISUAL_PCM_SAMPLES);
         let read_count = count.min(available);
         let start = (visual.pcm_write + VISUAL_PCM_SAMPLES - read_count) % VISUAL_PCM_SAMPLES;
-        let mut out = vec![0.0f32; count];
+        let mut out = vec![0.0f32; count * 2];
         let offset = count.saturating_sub(read_count);
         for index in 0..read_count {
-            out[offset + index] = visual.pcm[(start + index) % VISUAL_PCM_SAMPLES];
+            let source = (start + index) % VISUAL_PCM_SAMPLES;
+            let target = (offset + index) * 2;
+            out[target] = visual.pcm_stereo[source * 2];
+            out[target + 1] = visual.pcm_stereo[source * 2 + 1];
         }
+        apply_projectm_visual_gain(&mut out);
         out
     }
 
@@ -1979,6 +1992,35 @@ impl NativeAudioEngine {
             position: self.position(),
             duration: self.duration(),
         }
+    }
+}
+
+fn apply_projectm_visual_gain(samples: &mut [f32]) {
+    if samples.is_empty() {
+        return;
+    }
+
+    let mut peak = 0.0f32;
+    let mut sum_sq = 0.0f32;
+    for sample in samples.iter() {
+        let value = sample.clamp(-1.0, 1.0);
+        peak = peak.max(value.abs());
+        sum_sq += value * value;
+    }
+    if peak <= 0.0 {
+        return;
+    }
+
+    let rms = (sum_sq / samples.len().max(1) as f32).sqrt();
+    let peak_gain = 0.72 / peak.max(1e-6);
+    let rms_gain = 0.18 / rms.max(1e-6);
+    let gain = peak_gain.min(rms_gain).clamp(1.0, 8.0);
+    if gain <= 1.02 {
+        return;
+    }
+
+    for sample in samples.iter_mut() {
+        *sample = (*sample * gain).tanh();
     }
 }
 
@@ -2164,9 +2206,9 @@ pub fn spectrum_pair(bands: usize) -> NativeSpectrumPair {
     }
 }
 
-pub fn projectm_pcm(count_per_channel: usize) -> Vec<f32> {
+pub fn projectm_pcm_stereo(count_per_channel: usize) -> Vec<f32> {
     engine()
         .lock()
-        .map(|engine| engine.projectm_pcm(count_per_channel))
-        .unwrap_or_else(|_| vec![0.0; count_per_channel.clamp(64, VISUAL_PCM_SAMPLES)])
+        .map(|engine| engine.projectm_pcm_stereo(count_per_channel))
+        .unwrap_or_else(|_| vec![0.0; count_per_channel.clamp(64, VISUAL_PCM_SAMPLES) * 2])
 }

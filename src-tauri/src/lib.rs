@@ -356,8 +356,8 @@ fn native_audio_spectrum_pair(bands: usize) -> native_audio::NativeSpectrumPair 
 
 #[tauri::command]
 fn feed_projectm_native_audio(count_per_channel: usize) -> Result<bool, String> {
-    let samples = native_audio::projectm_pcm(count_per_channel);
-    feed_projectm_pcm(1, samples.len() as u32, samples)
+    let samples = native_audio::projectm_pcm_stereo(count_per_channel);
+    feed_projectm_pcm(2, (samples.len() / 2) as u32, samples)
 }
 
 fn text_looks_like_headphones(value: &str) -> bool {
@@ -1114,6 +1114,8 @@ fn start_projectm_visualizer(app: tauri::AppHandle) -> Result<String, String> {
         .env("PROJECTM_PRESETS_PATH", &presets)
         .env("ARDALI_VIS_MAIN_W", "900")
         .env("ARDALI_VIS_MAIN_H", "650")
+        .env("ARDALI_VIS_TEXTURE_QUALITY", "q2048")
+        .env("ARDALI_VIS_CLARITY_MODE", "sharp")
         .current_dir(working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

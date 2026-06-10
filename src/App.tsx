@@ -3439,10 +3439,28 @@ export function App() {
             }
             const pcmFrame = projectMFeedRef.current;
             graph.rawAnalyser.getFloatTimeDomainData(pcmFrame);
+            let peak = 0;
+            let sumSq = 0;
+            for (let index = 0; index < pcmFrame.length; index += 1) {
+              const value = Number(pcmFrame[index]) || 0;
+              peak = Math.max(peak, Math.abs(value));
+              sumSq += value * value;
+            }
+            const rms = Math.sqrt(sumSq / Math.max(1, pcmFrame.length));
+            const gain =
+              peak > 0
+                ? Math.max(1, Math.min(8, Math.min(0.72 / Math.max(peak, 1e-6), 0.18 / Math.max(rms, 1e-6))))
+                : 1;
+            const stereoSamples = new Array<number>(pcmFrame.length * 2);
+            for (let index = 0; index < pcmFrame.length; index += 1) {
+              const value = Math.tanh((Number(pcmFrame[index]) || 0) * gain);
+              stereoSamples[index * 2] = value;
+              stereoSamples[index * 2 + 1] = value;
+            }
             const payload: ProjectMPcmPayload = {
-              channels: 1,
+              channels: 2,
               countPerChannel: pcmFrame.length,
-              samples: Array.prototype.slice.call(pcmFrame) as number[],
+              samples: stereoSamples,
             };
             void invoke("feed_projectm_pcm", payload).catch((error) => {
               reportClientError("projectm.pcm", error);

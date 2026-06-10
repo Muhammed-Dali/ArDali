@@ -3394,6 +3394,12 @@ int main(int argc, char* argv[]) {
 
     // Preset taraması sonrası seçici ayarlarını yükle; böylece kaydedilen yolları indekslere eşleyebiliriz.
     loadPresetPickerSettings();
+    if (const char* textureQuality = std::getenv("ARDALI_VIS_TEXTURE_QUALITY")) {
+        g.textureQuality = textureQualityFromString(textureQuality);
+    }
+    if (const char* clarityMode = std::getenv("ARDALI_VIS_CLARITY_MODE")) {
+        g.clarityMode = clarityModeFromString(clarityMode);
+    }
 
     // Üst uygulama varsayılan boyut sağlıyorsa onu tercih et (her seferinde bu boyutta aç).
     if (const char* w = std::getenv("ARDALI_VIS_MAIN_W")) {
