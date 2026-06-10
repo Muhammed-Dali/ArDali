@@ -38,7 +38,8 @@ jobs:
             libssl-dev \
             libsdl2-dev \
             libsdl2-image-dev \
-            libprojectm-dev \
+            libglm-dev \
+            ninja-build \
             libwayland-dev \
             libx11-dev \
             libgl1-mesa-dev \
@@ -58,6 +59,25 @@ jobs:
 
       - name: Build frontend
         run: npm run frontend:build
+
+      - name: Build projectM 4
+        run: |
+          PROJECTM_VERSION=4.1.6
+          PROJECTM_PREFIX="$RUNNER_TEMP/projectm-install"
+          curl -L "https://github.com/projectM-visualizer/projectm/archive/refs/tags/v${PROJECTM_VERSION}.tar.gz" -o "$RUNNER_TEMP/projectm.tar.gz"
+          mkdir -p "$RUNNER_TEMP/projectm-src"
+          tar -xzf "$RUNNER_TEMP/projectm.tar.gz" -C "$RUNNER_TEMP/projectm-src" --strip-components=1
+          cmake -S "$RUNNER_TEMP/projectm-src" -B "$RUNNER_TEMP/projectm-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PROJECTM_PREFIX" \
+            -DBUILD_SHARED_LIBS=ON
+          cmake --build "$RUNNER_TEMP/projectm-build" --parallel
+          cmake --install "$RUNNER_TEMP/projectm-build"
+          {
+            echo "CMAKE_PREFIX_PATH=$PROJECTM_PREFIX:$CMAKE_PREFIX_PATH"
+            echo "PKG_CONFIG_PATH=$PROJECTM_PREFIX/lib/pkgconfig:$PROJECTM_PREFIX/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH"
+            echo "LD_LIBRARY_PATH=$PROJECTM_PREFIX/lib:$PROJECTM_PREFIX/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+          } >> "$GITHUB_ENV"
 
       - name: Build native visualizer resource
         run: npm run visualizer:build
