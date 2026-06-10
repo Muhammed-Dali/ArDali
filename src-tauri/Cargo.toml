@@ -1,6 +1,6 @@
 [package]
 name = "ardali-webmedia"
-version = "0.1.0"
+version = "4.0.0"
 description = "ArDali WebMedia Tauri uygulamasi"
 authors = ["ArDali"]
 edition = "2021"
