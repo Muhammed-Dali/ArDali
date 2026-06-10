@@ -836,7 +836,7 @@ static const char* fpsModeToString(QualityFpsMode m) {
         case QualityFpsMode::MID_25: return "mid25";
         case QualityFpsMode::HIGH_35: return "high35";
         case QualityFpsMode::SUPER_60: return "super60";
-        default: return "super60";
+        default: return "mid25";
     }
 }
 
@@ -846,7 +846,7 @@ static QualityFpsMode fpsModeFromString(const std::string& s) {
     if (v == "mid25" || v == "25") return QualityFpsMode::MID_25;
     if (v == "high35" || v == "35") return QualityFpsMode::HIGH_35;
     if (v == "super60" || v == "60") return QualityFpsMode::SUPER_60;
-    return QualityFpsMode::SUPER_60;
+    return QualityFpsMode::MID_25;
 }
 
 static const char* textureQualityToString(TextureQuality q) {
@@ -980,10 +980,11 @@ struct AppState {
     AspectMode aspect = AspectMode::Free;
     QualityMode quality = QualityMode::High;
 
-    QualityFpsMode fpsMode = QualityFpsMode::SUPER_60;
+    QualityFpsMode fpsMode = QualityFpsMode::MID_25;
     TextureQuality textureQuality = TextureQuality::Q1024;
     ClarityMode clarityMode = ClarityMode::Balanced;
-    int targetFps = 60;
+    int targetFps = 25;
+    int projectmMotionFps = 45;
 
     // Ses beslemesi: SADECE stdin üzerinden uygulama PCM'i (Electron float32 interleaved pipe eder).
     std::vector<uint8_t> pcmInBuf;
@@ -1627,13 +1628,26 @@ static int fpsFromMode(QualityFpsMode m) {
     }
 }
 
+static int motionFpsFromMode(QualityFpsMode m) {
+    switch (m) {
+        case QualityFpsMode::LOW_15: return 30;
+        case QualityFpsMode::MID_25: return 45;
+        case QualityFpsMode::HIGH_35: return 60;
+        case QualityFpsMode::SUPER_60: return 90;
+        default: return 45;
+    }
+}
+
 static void applyFpsMode(QualityFpsMode m) {
     g.fpsMode = m;
     g.targetFps = fpsFromMode(m);
+    g.projectmMotionFps = motionFpsFromMode(m);
     if (g.pm) {
-        projectm_set_fps(g.pm, g.targetFps);
+        projectm_set_fps(g.pm, g.projectmMotionFps);
     }
-    std::cout << "[UI] target fps set to " << g.targetFps << " (vsync may cap actual fps)" << std::endl;
+    std::cout << "[UI] target fps set to " << g.targetFps
+              << " | projectM motion fps set to " << g.projectmMotionFps
+              << " (vsync may cap actual fps)" << std::endl;
     savePresetPickerSettings();
 }
 

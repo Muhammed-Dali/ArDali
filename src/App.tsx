@@ -3425,7 +3425,7 @@ export function App() {
     const sendFrame = () => {
       if (cancelled) return;
       const now = performance.now();
-      if (now - lastSent >= 33) {
+      if (now - lastSent >= 16) {
         lastSent = now;
         if (nativeAudioMode && !htmlAudioFallbackActive) {
           void invoke("feed_projectm_native_audio", { countPerChannel: 1024 }).catch((error) => {
