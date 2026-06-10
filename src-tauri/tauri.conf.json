@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ArDali WebMedia",
+  "version": "0.1.0",
+  "identifier": "com.ardali.webmedia",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run visualizer:build && npm run frontend:build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "ArDali WebMedia",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 400,
+        "minHeight": 300,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$HOME/**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/ardali_256.png"],
+    "linux": {
+      "deb": {
+        "depends": ["libayatana-appindicator3-1 | libappindicator3-1"]
+      }
+    },
+    "resources": [
+      "../native-dist/linux/ardali-projectm-visualizer",
+      "../public/visualizer-presets"
+    ]
+  }
+}

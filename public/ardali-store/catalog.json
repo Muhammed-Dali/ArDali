@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "updatedAt": "2026-06-09",
+  "extensions": [
+    {
+      "id": "youtube-focus",
+      "name": "YouTube Focus Mode",
+      "version": "1.0.1",
+      "author": "ArDali",
+      "official": true,
+      "category": "YouTube",
+      "description": "YouTube icin otomatik odak modu, ArDali rozeti ve sade izleme yardimcisi ekler.",
+      "type": "userscript",
+      "entry": "/ardali-store/extensions/youtube-focus/main.js",
+      "matches": ["https://www.youtube.com/*", "https://youtube.com/*"],
+      "permissions": ["dom", "style"],
+      "defaultEnabled": false
+    }
+  ]
+}

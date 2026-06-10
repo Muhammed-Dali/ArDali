@@ -1,0 +1,14 @@
+node_modules/
+dist/
+native-dist/
+build-dli-analyzers/
+build-visualizer-ardali/
+build-visualizer/
+src-tauri/target/
+src-tauri/gen/
+*.log
+.DS_Store
+.vscode/
+.agents/
+.codex/
+**/.ci-tmp/

@@ -1,0 +1,27 @@
+[package]
+name = "ardali-webmedia"
+version = "0.1.0"
+description = "ArDali WebMedia Tauri uygulamasi"
+authors = ["ArDali"]
+edition = "2021"
+
+[lib]
+name = "ardali_webmedia_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+cc = "1"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png", "unstable"] }
+tauri-plugin-dialog = "2"
+mpris-player = { path = "vendor/mpris-player" }
+dbus = "0.9.11"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18.2"
+glib = "0.18.5"
+webkit2gtk = { version = "2.0.2", features = ["v2_16"] }

@@ -1,0 +1,46 @@
+{
+  "name": "ardali-webmedia-tauri",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run dali:web:build && vite",
+    "frontend:build": "npm run dali:web:build && tsc && vite build",
+    "build": "npm run frontend:build && npm run clean:frontend",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "npm run dali:web:build && tauri dev",
+    "tauri:dev:x11": "GDK_BACKEND=x11 tauri dev",
+    "tauri:dev:x11-no-composite": "GDK_BACKEND=x11 WEBKIT_DISABLE_COMPOSITING_MODE=1 tauri dev",
+    "tauri:dev:wayland-no-composite": "WEBKIT_DISABLE_COMPOSITING_MODE=1 tauri dev",
+    "tauri:build": "tauri build",
+    "posttauri:build": "npm run clean:release",
+    "clean": "node scripts/clean.mjs",
+    "clean:frontend": "node scripts/clean.mjs --frontend",
+    "clean:release": "node scripts/clean.mjs --release",
+    "clean:visualizer-cache": "node scripts/clean.mjs --visualizer-cache",
+    "clean:rust-cache": "node scripts/clean.mjs --rust-cache",
+    "clean:all": "node scripts/clean.mjs --all",
+    "visualizer:build": "node scripts/build-visualizer.mjs",
+    "dli:build": "node scripts/build-dli-analyzers.mjs",
+    "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "build:clean": "npm run tauri:build",
+    "eq-presets:build": "node scripts/build-eq-preset-index.mjs",
+    "dali:web:build": "node scripts/build-dali-web-engine.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}

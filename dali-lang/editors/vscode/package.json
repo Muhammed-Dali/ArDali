@@ -1,0 +1,44 @@
+{
+  "name": "dali-language",
+  "displayName": "DALI Language",
+  "description": "Syntax highlighting for .dali and .dl audio DSL files.",
+  "version": "0.1.5",
+  "publisher": "ardali",
+  "license": "MIT",
+  "main": "./extension.js",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "dali",
+        "aliases": [
+          "DALI",
+          "dali"
+        ],
+        "extensions": [
+          ".dali",
+          ".dl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dali",
+        "scopeName": "source.dali",
+        "path": "./syntaxes/dali.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "dali",
+        "path": "./snippets/dali.code-snippets"
+      }
+    ]
+  }
+}
