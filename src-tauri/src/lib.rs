@@ -1163,6 +1163,32 @@ fn prepare_visualizer_executable(app: &tauri::AppHandle, exe: &Path) -> Result<P
         )
     })?;
 
+    if let Some(source_dir) = exe.parent() {
+        for entry in fs::read_dir(source_dir).map_err(|error| {
+            format!(
+                "ProjectM runtime klasoru okunamadi: {} ({error})",
+                source_dir.display()
+            )
+        })? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let source = entry.path();
+            let Some(name) = source.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !name.to_ascii_lowercase().contains("projectm") || !name.contains(".so") {
+                continue;
+            }
+            let target = runtime_dir.join(name);
+            fs::copy(&source, &target).map_err(|error| {
+                format!(
+                    "ProjectM kutuphanesi kopyalanamadi: {} -> {} ({error})",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+
     let mut permissions = fs::metadata(&runtime_exe)
         .map_err(|error| {
             format!(
@@ -1180,6 +1206,14 @@ fn prepare_visualizer_executable(app: &tauri::AppHandle, exe: &Path) -> Result<P
     })?;
 
     Ok(runtime_exe)
+}
+
+fn projectm_log_file(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_log_dir()
+        .or_else(|_| app.path().app_data_dir())
+        .ok()
+        .map(|dir| dir.join("projectm-visualizer.log"))
 }
 
 #[tauri::command]
@@ -1224,19 +1258,59 @@ fn start_projectm_visualizer(
         .current_dir(working_dir)
         .stdin(Stdio::piped());
 
+    #[cfg(target_os = "linux")]
+    {
+        let mut library_path = working_dir.as_os_str().to_os_string();
+        if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+            library_path.push(":");
+            library_path.push(existing);
+        }
+        command.env("LD_LIBRARY_PATH", library_path);
+    }
+
+    let log_file = projectm_log_file(&app);
     if cfg!(debug_assertions) {
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else if let Some(path) = &log_file {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => match file.try_clone() {
+                Ok(stdout) => {
+                    command.stdout(Stdio::from(stdout)).stderr(Stdio::from(file));
+                }
+                Err(_) => {
+                    command.stdout(Stdio::null()).stderr(Stdio::null());
+                }
+            },
+            Err(_) => {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
     } else {
         command.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         format!(
             "ProjectM baslatilamadi: {} | presets: {} | hata: {error}",
             exe.display(),
             presets.display()
         )
     })?;
+
+    thread::sleep(Duration::from_millis(350));
+    if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+        let log_hint = log_file
+            .as_ref()
+            .map(|path| format!(" | log: {}", path.display()))
+            .unwrap_or_default();
+        return Err(format!(
+            "ProjectM hemen kapandi: {status} | binary: {}{log_hint}",
+            exe.display()
+        ));
+    }
 
     *process = Some(child);
     Ok(format!("ProjectM baslatildi: {}", exe.display()))

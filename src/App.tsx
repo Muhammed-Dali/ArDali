@@ -5031,9 +5031,12 @@ export function App() {
     } catch (error) {
       projectMActiveRef.current = false;
       setProjectMActive(false);
+      const message = error instanceof Error ? error.message : String(error);
+      setWebRuntimeStatus(`ProjectM baslatilamadi: ${message}`);
+      window.alert(`ProjectM baslatilamadi:\n${message}`);
       reportClientError("projectm.open", error);
     }
-  }, [webSettings.language]);
+  }, [webSettings]);
 
   const openSettingsWindow = useCallback(async () => {
     const url = "/?view=settings";
