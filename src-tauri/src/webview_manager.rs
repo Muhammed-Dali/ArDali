@@ -99,17 +99,39 @@ fn parse_platform_url(platform_url: &str) -> Result<Url, String> {
 fn web_user_agent_for_mode(mode: &str) -> Option<String> {
     match mode {
         "desktop" => Some(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 \
+             (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
                 .to_string(),
         ),
         "mobile" => Some(
-            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 \
+             (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
                 .to_string(),
         ),
         _ => None,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_web_compat_settings(settings: &webkit2gtk::Settings) {
+    settings.set_enable_javascript(true);
+    settings.set_enable_javascript_markup(true);
+    settings.set_enable_fullscreen(true);
+    settings.set_enable_html5_database(true);
+    settings.set_enable_html5_local_storage(true);
+    settings.set_enable_media(true);
+    settings.set_enable_media_capabilities(true);
+    settings.set_enable_media_stream(true);
+    settings.set_enable_mediasource(true);
+    settings.set_enable_encrypted_media(true);
+    settings.set_enable_webgl(true);
+    settings.set_enable_accelerated_2d_canvas(true);
+    settings.set_enable_dns_prefetching(true);
+    settings.set_enable_page_cache(true);
+    settings.set_enable_site_specific_quirks(true);
+    settings.set_media_playback_requires_user_gesture(false);
+    settings.set_media_playback_allows_inline(true);
+    settings.set_enable_write_console_messages_to_stdout(true);
 }
 
 fn webview_bounds(
@@ -344,8 +366,7 @@ fn install_or_update_gtk_webview(
                 };
                 let webview = webkit2gtk::WebView::with_context(&web_context);
                 if let Some(settings) = WebViewExt::settings(&webview) {
-                    settings.set_enable_fullscreen(true);
-                    settings.set_enable_write_console_messages_to_stdout(true);
+                    apply_web_compat_settings(&settings);
                 }
                 webview.set_halign(gtk::Align::Start);
                 webview.set_valign(gtk::Align::Start);
