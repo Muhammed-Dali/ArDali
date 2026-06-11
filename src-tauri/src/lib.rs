@@ -1089,6 +1089,12 @@ fn find_visualizer_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
     for root in project_root_candidates(app) {
         candidates.push(root.join(exe_name));
         candidates.push(
+            root.join("_up_")
+                .join("native-dist")
+                .join(visualizer_platform_dir())
+                .join(exe_name),
+        );
+        candidates.push(
             root.join("native-dist")
                 .join(visualizer_platform_dir())
                 .join(exe_name),
@@ -1096,6 +1102,21 @@ fn find_visualizer_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
         candidates.push(root.join("native-dist").join(exe_name));
         candidates.push(root.join("build-visualizer-ardali").join(exe_name));
         candidates.push(root.join("build-visualizer").join(exe_name));
+    }
+    if let Some(appdir) = std::env::var_os("APPDIR") {
+        let appdir = PathBuf::from(appdir);
+        candidates.push(
+            appdir
+                .join("usr")
+                .join("lib")
+                .join("ArDali WebMedia")
+                .join("_up_")
+                .join("native-dist")
+                .join(visualizer_platform_dir())
+                .join(exe_name),
+        );
+        candidates.push(appdir.join("usr").join("lib").join(exe_name));
+        candidates.push(appdir.join("usr").join("bin").join(exe_name));
     }
     first_existing_path(candidates)
 }
@@ -1115,11 +1136,40 @@ fn find_visualizer_presets(app: &tauri::AppHandle) -> Option<PathBuf> {
         candidates.push(path);
     }
     for root in project_root_candidates(app) {
+        candidates.push(
+            root.join("_up_")
+                .join("public")
+                .join("visualizer-presets"),
+        );
         candidates.push(root.join("public").join("visualizer-presets"));
         candidates.push(root.join("visualizer-presets"));
         candidates.push(root.join("third_party").join("projectm").join("presets"));
     }
+    if let Some(appdir) = std::env::var_os("APPDIR") {
+        candidates.push(
+            PathBuf::from(appdir)
+                .join("usr")
+                .join("lib")
+                .join("ArDali WebMedia")
+                .join("_up_")
+                .join("public")
+                .join("visualizer-presets"),
+        );
+    }
     first_existing_path(candidates)
+}
+
+#[cfg(target_os = "linux")]
+fn configure_packaged_webkit_runtime() {
+    if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    }
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+    if std::env::var_os("WEBKIT_DISABLE_SANDBOX").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_SANDBOX", "1");
+    }
 }
 
 fn app_language_to_locale(language: Option<&str>) -> &'static str {
@@ -2290,6 +2340,8 @@ fn create_tray_inner(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    configure_packaged_webkit_runtime();
     configure_media_backend();
     start_local_media_server();
 
