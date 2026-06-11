@@ -25,11 +25,15 @@ use tauri::{
     image::Image,
     menu::{CheckMenuItem, IconMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, WindowEvent,
+    Emitter, Manager, Runtime, UserAttentionType, WindowEvent,
 };
 
 mod native_audio;
+mod plugin_commands;
+mod security;
 mod webview_manager;
+
+pub use security::validator::PluginValidator;
 
 static PROJECTM_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 static MEDIA_SERVER_STARTED: OnceLock<()> = OnceLock::new();
@@ -1088,8 +1092,17 @@ fn find_visualizer_presets(app: &tauri::AppHandle) -> Option<PathBuf> {
     first_existing_path(candidates)
 }
 
+fn app_language_to_locale(language: Option<&str>) -> &'static str {
+    match language.unwrap_or("tr-TR") {
+        "ar-SA" => "ar_SA.UTF-8",
+        "en-US" => "en_US.UTF-8",
+        "es-ES" => "es_ES.UTF-8",
+        _ => "tr_TR.UTF-8",
+    }
+}
+
 #[tauri::command]
-fn start_projectm_visualizer(app: tauri::AppHandle) -> Result<String, String> {
+fn start_projectm_visualizer(app: tauri::AppHandle, language: Option<String>, theme: Option<String>) -> Result<String, String> {
     let mut process = PROJECTM_PROCESS.lock().map_err(|error| error.to_string())?;
     if let Some(child) = process.as_mut() {
         if child
@@ -1108,7 +1121,8 @@ fn start_projectm_visualizer(app: tauri::AppHandle) -> Result<String, String> {
         .ok_or_else(|| "ProjectM milk preset klasoru bulunamadi.".to_string())?;
     let working_dir = exe.parent().unwrap_or_else(|| Path::new("."));
 
-    let child = Command::new(&exe)
+    let mut command = Command::new(&exe);
+    command
         .arg("--presets")
         .arg(&presets)
         .env("PROJECTM_PRESETS_PATH", &presets)
@@ -1116,10 +1130,20 @@ fn start_projectm_visualizer(app: tauri::AppHandle) -> Result<String, String> {
         .env("ARDALI_VIS_MAIN_H", "650")
         .env("ARDALI_VIS_TEXTURE_QUALITY", "q2048")
         .env("ARDALI_VIS_CLARITY_MODE", "sharp")
+        .env("ARDALI_LANG", app_language_to_locale(language.as_deref()))
+        .env("ARDALI_UI_THEME", theme.as_deref().unwrap_or("black"))
         .current_dir(working_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdin(Stdio::piped());
+
+    if cfg!(debug_assertions) {
+        command
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+
+    let child = command
         .spawn()
         .map_err(|error| format!("ProjectM baslatilamadi: {error}"))?;
 
@@ -1179,6 +1203,27 @@ fn stop_projectm_visualizer() -> Result<(), String> {
         let _ = child.wait();
     }
     *process = None;
+    Ok(())
+}
+
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        let _ = app;
+        return Ok(());
+    }
+
+    #[cfg(not(debug_assertions))]
+    app.restart();
+}
+
+#[tauri::command]
+fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "Ana pencere bulunamadi".to_string())?;
+    hide_main_window_to_tray(&window);
     Ok(())
 }
 
@@ -1827,11 +1872,193 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        let _ = window.request_user_attention(Some(UserAttentionType::Informational));
+
+        #[cfg(target_os = "linux")]
+        {
+            let _ = window.set_always_on_top(true);
+            let focused_window = window.clone();
+            tauri::async_runtime::spawn(async move {
+                thread::sleep(Duration::from_millis(120));
+                let _ = focused_window.set_focus();
+                let _ = focused_window.set_always_on_top(false);
+            });
+        }
     }
+}
+
+fn hide_main_window_to_tray(window: &tauri::Window) {
+    if let Err(error) = window.hide() {
+        eprintln!("[window] Ana pencere gizlenemedi: {error}");
+    }
+
+    let delayed_window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        thread::sleep(Duration::from_millis(80));
+        if let Err(error) = delayed_window.hide() {
+            eprintln!("[window] Ana pencere gecikmeli gizlenemedi: {error}");
+        }
+    });
 }
 
 fn emit_media_control(app: &tauri::AppHandle, action: &str) {
     let _ = app.emit("mpris-control", action);
+}
+
+struct TrayLabels {
+    show: &'static str,
+    previous: &'static str,
+    play_pause: &'static str,
+    stop: &'static str,
+    stop_after_current: &'static str,
+    next: &'static str,
+    mute: &'static str,
+    like: &'static str,
+    exit: &'static str,
+}
+
+fn normalize_app_language(language: &str) -> &'static str {
+    let lower = language.trim().to_ascii_lowercase();
+    if lower.starts_with("ar") {
+        "ar-SA"
+    } else if lower.starts_with("es") {
+        "es-ES"
+    } else if lower.starts_with("tr") {
+        "tr-TR"
+    } else {
+        "en-US"
+    }
+}
+
+fn system_app_language() -> &'static str {
+    let language = std::env::var("LANGUAGE")
+        .ok()
+        .or_else(|| std::env::var("LC_ALL").ok())
+        .or_else(|| std::env::var("LC_MESSAGES").ok())
+        .or_else(|| std::env::var("LANG").ok())
+        .unwrap_or_default();
+    normalize_app_language(&language)
+}
+
+fn tray_labels(language: &str) -> TrayLabels {
+    match normalize_app_language(language) {
+        "ar-SA" => TrayLabels {
+            show: "إظهار",
+            previous: "◀  المقطع السابق",
+            play_pause: "▶  تشغيل / إيقاف مؤقت",
+            stop: "■  إيقاف",
+            stop_after_current: "⏱  إيقاف بعد هذا المقطع",
+            next: "▶  المقطع التالي",
+            mute: "🔇  كتم / إلغاء الكتم",
+            like: "❤️  إعجاب",
+            exit: "⏻  خروج",
+        },
+        "es-ES" => TrayLabels {
+            show: "Mostrar",
+            previous: "◀  Pista anterior",
+            play_pause: "▶  Reproducir / Pausar",
+            stop: "■  Detener",
+            stop_after_current: "⏱  Detener despues de esta pista",
+            next: "▶  Pista siguiente",
+            mute: "🔇  Silenciar / activar sonido",
+            like: "❤️  Me gusta",
+            exit: "⏻  Salir",
+        },
+        "en-US" => TrayLabels {
+            show: "Show",
+            previous: "◀  Previous track",
+            play_pause: "▶  Play / Pause",
+            stop: "■  Stop",
+            stop_after_current: "⏱  Stop after current track",
+            next: "▶  Next track",
+            mute: "🔇  Mute / Unmute",
+            like: "❤️  Like",
+            exit: "⏻  Quit",
+        },
+        _ => TrayLabels {
+            show: "Göster",
+            previous: "◀  Önceki parça",
+            play_pause: "▶  Oynat / Duraklat",
+            stop: "■  Durdur",
+            stop_after_current: "⏱  Bu parçadan sonra durdur",
+            next: "▶  Sonraki parça",
+            mute: "🔇  Sessiz / Sesi aç",
+            like: "❤️  Beğen",
+            exit: "⏻  Çıkış",
+        },
+    }
+}
+
+fn create_tray_menu<M, R>(manager: &M, language: &str) -> tauri::Result<Menu<R>>
+where
+    M: Manager<R>,
+    R: Runtime,
+{
+    let labels = tray_labels(language);
+    let previous = MenuItem::with_id(
+        manager,
+        "tray_previous",
+        labels.previous,
+        true,
+        None::<&str>,
+    )?;
+    let play_pause = MenuItem::with_id(
+        manager,
+        "tray_play_pause",
+        labels.play_pause,
+        true,
+        None::<&str>,
+    )?;
+    let stop = MenuItem::with_id(manager, "tray_stop", labels.stop, true, None::<&str>)?;
+    let stop_after_current = CheckMenuItem::with_id(
+        manager,
+        "tray_stop_after_current",
+        labels.stop_after_current,
+        true,
+        false,
+        None::<&str>,
+    )?;
+    let next = MenuItem::with_id(manager, "tray_next", labels.next, true, None::<&str>)?;
+    let mute = MenuItem::with_id(manager, "tray_mute", labels.mute, true, None::<&str>)?;
+    let like = MenuItem::with_id(manager, "tray_like", labels.like, true, None::<&str>)?;
+    let show_icon = Image::from_bytes(include_bytes!("../icons/ardali_256.png"))?;
+    let show = IconMenuItem::with_id(
+        manager,
+        "tray_show",
+        labels.show,
+        true,
+        Some(show_icon),
+        None::<&str>,
+    )?;
+    let exit = MenuItem::with_id(manager, "tray_exit", labels.exit, true, None::<&str>)?;
+    let separator_one = PredefinedMenuItem::separator(manager)?;
+    let separator_two = PredefinedMenuItem::separator(manager)?;
+
+    Menu::with_items(
+        manager,
+        &[
+            &show,
+            &separator_two,
+            &previous,
+            &play_pause,
+            &stop,
+            &stop_after_current,
+            &next,
+            &separator_one,
+            &mute,
+            &like,
+            &exit,
+        ],
+    )
+}
+
+#[tauri::command]
+fn update_tray_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
+    let menu = create_tray_menu(&app, &language).map_err(|error| error.to_string())?;
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_menu(Some(menu)).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn create_tray(app: &tauri::App) {
@@ -1856,63 +2083,13 @@ fn create_tray(app: &tauri::App) {
 }
 
 fn create_tray_inner(app: &tauri::App) -> tauri::Result<()> {
-    let previous = MenuItem::with_id(app, "tray_previous", "◀  Onceki parca", true, None::<&str>)?;
-    let play_pause = MenuItem::with_id(
-        app,
-        "tray_play_pause",
-        "▶  Oynat / Duraklat",
-        true,
-        None::<&str>,
-    )?;
-    let stop = MenuItem::with_id(app, "tray_stop", "■  Durdur", true, None::<&str>)?;
-    let stop_after_current = CheckMenuItem::with_id(
-        app,
-        "tray_stop_after_current",
-        "⏱  Bu parcadan sonra durdur",
-        true,
-        false,
-        None::<&str>,
-    )?;
-    let next = MenuItem::with_id(app, "tray_next", "▶  Sonraki parca", true, None::<&str>)?;
-    let mute = MenuItem::with_id(app, "tray_mute", "🔇  Sessiz / Sesi ac", true, None::<&str>)?;
-    let like = MenuItem::with_id(app, "tray_like", "❤️  Begen", true, None::<&str>)?;
-    let show_icon = Image::from_bytes(include_bytes!("../icons/ardali_256.png"))?;
-    let show = IconMenuItem::with_id(
-        app,
-        "tray_show",
-        "Goster",
-        true,
-        Some(show_icon),
-        None::<&str>,
-    )?;
-    let exit = MenuItem::with_id(app, "tray_exit", "⏻  Cikis", true, None::<&str>)?;
-    let separator_one = PredefinedMenuItem::separator(app)?;
-    let separator_two = PredefinedMenuItem::separator(app)?;
-
-    let menu = Menu::with_items(
-        app,
-        &[
-            &show,
-            &separator_two,
-            &previous,
-            &play_pause,
-            &stop,
-            &stop_after_current,
-            &next,
-            &separator_one,
-            &mute,
-            &like,
-            &exit,
-        ],
-    )?;
-
+    let menu = create_tray_menu(app, system_app_language())?;
     let icon = Image::from_bytes(include_bytes!("../icons/ardali_256.png"))?;
 
     TrayIconBuilder::with_id("main-tray")
         .tooltip("ArDali WebMedia")
         .icon(icon)
         .menu(&menu)
-        .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "tray_previous" => emit_media_control(app, "previous"),
             "tray_play_pause" => emit_media_control(app, "play-pause"),
@@ -1965,7 +2142,7 @@ pub fn run() {
                     && !APP_QUITTING.load(Ordering::SeqCst)
                 {
                     api.prevent_close();
-                    let _ = window.hide();
+                    hide_main_window_to_tray(window);
                 }
             }
         })
@@ -1993,6 +2170,9 @@ pub fn run() {
             update_mpris_position,
             extract_cover_art,
             cache_media_art,
+            restart_app,
+            hide_main_window,
+            update_tray_language,
             start_projectm_visualizer,
             feed_projectm_pcm,
             stop_projectm_visualizer,
@@ -2002,9 +2182,11 @@ pub fn run() {
             webview_manager::park_web_view,
             webview_manager::navigate_web_history,
             webview_manager::apply_web_dali_script,
+            webview_manager::web_dali_audio_snapshot,
             webview_manager::clear_web_data,
             webview_manager::update_webview_bounds,
-            webview_manager::update_webview_bounds_rect
+            webview_manager::update_webview_bounds_rect,
+            plugin_commands::install_plugin
         ])
         .run(tauri::generate_context!())
         .expect("Tauri uygulamasi calistirilamadi");

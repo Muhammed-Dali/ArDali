@@ -962,7 +962,11 @@ struct AppState {
     float pickerDpiScale = 1.0f;
     float pickerLastDpiScale = 0.0f;
     bool pickerDockAnimating = false;
+    bool pickerVisible = false;
+    bool pickerPrewarmed = false;
     uint64_t pickerDockAnimStartMs = 0;
+    uint64_t pickerOpenMs = 0;
+    uint64_t lastPickerRenderMs = 0;
     int pickerDockFromX = 0;
     int pickerDockToX = 0;
     int pickerDockY = 0;
@@ -990,6 +994,7 @@ struct AppState {
     std::vector<uint8_t> pcmInBuf;
     std::vector<float> pcmTmp;
     uint64_t lastPcmMs = 0;
+    double fallbackPcmPhase = 0.0;
     unsigned int pmMaxSamplesPerChannel = 0;
     bool audioStale = true;
     bool debugOverlay = false;
@@ -1360,13 +1365,13 @@ static bool initStdinNonBlocking() {
 #endif
 }
 
-static void feedSilenceIfStale(uint64_t now) {
+static void feedFallbackPcmIfStale(uint64_t now) {
     if (!g.pm) return;
     if (g.pmMaxSamplesPerChannel == 0) return;
 
-    // Yakın zamanda PCM almadıysak iç tamponu sessizlikle ezmeye devam et.
-    // Bu, duraklatıldığında "son sıfır olmayan ses"in kalıp görselleri hareket ettirmesini önler.
-    const uint64_t staleMs = 150;
+    // Yakın zamanda PCM almadıysak projectM'i tamamen öldürmek yerine düşük seviyeli
+    // ritmik bir stereo yedek besleme gönder. Gerçek PCM geldiği anda bu yol devreden çıkar.
+    const uint64_t staleMs = 260;
     if (g.lastPcmMs != 0 && (now - g.lastPcmMs) <= staleMs) {
         if (g.audioStale) {
             g.audioStale = false;
@@ -1377,13 +1382,38 @@ static void feedSilenceIfStale(uint64_t now) {
 
     if (!g.audioStale) {
         g.audioStale = true;
-        if (g.debugOverlay) std::cout << "[Audio] PCM stale (>" << staleMs << "ms) -> injecting silence" << std::endl;
+        if (g.debugOverlay) std::cout << "[Audio] PCM stale (>" << staleMs << "ms) -> injecting fallback motion" << std::endl;
     }
 
     const unsigned int n = g.pmMaxSamplesPerChannel;
     const size_t floats = (size_t)n * 2;
-    if (g.pcmTmp.size() < floats) g.pcmTmp.assign(floats, 0.0f);
-    else std::fill(g.pcmTmp.begin(), g.pcmTmp.begin() + (ptrdiff_t)floats, 0.0f);
+    if (g.pcmTmp.size() < floats) g.pcmTmp.resize(floats);
+
+    const double sampleRate = 48000.0;
+    const double baseHz = (g.fpsMode == QualityFpsMode::SUPER_60) ? 138.0
+                        : (g.fpsMode == QualityFpsMode::HIGH_35) ? 96.0
+                        : (g.fpsMode == QualityFpsMode::MID_25) ? 64.0
+                        : 38.0;
+    const double beatHz = (g.fpsMode == QualityFpsMode::SUPER_60) ? 6.2
+                        : (g.fpsMode == QualityFpsMode::HIGH_35) ? 4.3
+                        : (g.fpsMode == QualityFpsMode::MID_25) ? 2.6
+                        : 1.3;
+    const double twoPi = 6.28318530717958647692;
+
+    double phase = g.fallbackPcmPhase;
+    for (unsigned int i = 0; i < n; i++) {
+        const double beat = 0.58 + 0.42 * std::max(0.0, std::sin(phase * beatHz / baseHz));
+        const double tone = std::sin(phase) * 0.58 +
+                            std::sin(phase * 1.997 + 0.7) * 0.28 +
+                            std::sin(phase * 3.013 + 1.9) * 0.14;
+        const float left = (float)std::tanh(tone * beat * 0.58);
+        const float right = (float)std::tanh((tone * 0.86 + std::sin(phase * 0.51 + 2.1) * 0.18) * beat * 0.58);
+        g.pcmTmp[(size_t)i * 2] = left;
+        g.pcmTmp[(size_t)i * 2 + 1] = right;
+        phase += twoPi * baseHz / sampleRate;
+        if (phase > twoPi * 1024.0) phase = std::fmod(phase, twoPi);
+    }
+    g.fallbackPcmPhase = phase;
 
     projectm_pcm_add_float(g.pm, g.pcmTmp.data(), n, PROJECTM_STEREO);
 }
@@ -1499,7 +1529,14 @@ static void pumpPcmFromStdin() {
         }
 
         projectm_pcm_add_float(g.pm, samplesPtr, n, ch);
-        g.lastPcmMs = nowMs();
+        float peak = 0.0f;
+        const size_t sampleCount = (size_t)n * (size_t)latestChannels;
+        for (size_t i = 0; i < sampleCount; i++) {
+            peak = std::max(peak, std::fabs(samplesPtr[i]));
+        }
+        if (peak > 0.0025f) {
+            g.lastPcmMs = nowMs();
+        }
     }
 
     // Tüm tam paketleri tüket; yalnızca son yarım paket (varsa) tutulur.
@@ -1784,8 +1821,14 @@ static std::optional<std::string> findInterFontPath() {
     const std::vector<fs::path> candidates = []() {
         std::vector<fs::path> c;
         c.emplace_back(fs::path("assets/fonts/Inter-Regular.ttf"));
+        c.emplace_back(fs::path("public/assets/fonts/Inter-Regular.ttf"));
+        c.emplace_back(fs::path("dist/assets/fonts/Inter-Regular.ttf"));
         c.emplace_back(fs::path("../assets/fonts/Inter-Regular.ttf"));
+        c.emplace_back(fs::path("../public/assets/fonts/Inter-Regular.ttf"));
+        c.emplace_back(fs::path("../dist/assets/fonts/Inter-Regular.ttf"));
         c.emplace_back(fs::path("../../assets/fonts/Inter-Regular.ttf"));
+        c.emplace_back(fs::path("../../public/assets/fonts/Inter-Regular.ttf"));
+        c.emplace_back(fs::path("../../dist/assets/fonts/Inter-Regular.ttf"));
 
 #ifdef _WIN32
         // Windows: yürütülebilir konumundan çöz
@@ -1957,12 +2000,12 @@ static void reloadFontsForScale(float scale) {
 	    cfg.PixelSnapH = true;
 	    cfg.RasterizerMultiply = 1.15f; // okunabilirlik için biraz daha kalın
 
-	    // Varsayılan font boyutu: uygulamanın geri kalanıyla tutarlı tut.
-	    // Arapça metin küçük boyutlarda daha zor okunur; bu yüzden sadece Arapça için biraz büyüt.
+	    // Varsayılan Latin/sayı fontunu normal tut; Arapça glifler aşağıda ayrı fallback fonttan daha okunaklı eklenir.
 	    const bool isArabicUi = (detectUiLang() == UiLang::AR);
-	    const float basePx = isArabicUi ? 22.0f : 18.0f;
-	    const float minPx = isArabicUi ? 16.0f : 14.0f;
+	    const float basePx = isArabicUi ? 21.0f : 21.0f;
+	    const float minPx = 17.0f;
 	    const float fontPx = std::max(minPx, std::floor(basePx * scale));
+	    const float arabicFontPx = std::max(22.0f, std::floor(26.0f * scale));
 
 	    ImFont* font = io.Fonts->AddFontFromFileTTF(g.fontPath.c_str(), fontPx, &cfg, glyphRanges.Data);
 	    if (!font) {
@@ -2012,7 +2055,7 @@ static void reloadFontsForScale(float scale) {
                 mergeCfg.OversampleV = cfg.OversampleV;
                 mergeCfg.PixelSnapH = cfg.PixelSnapH;
                 mergeCfg.RasterizerMultiply = cfg.RasterizerMultiply;
-                if (!io.Fonts->AddFontFromFileTTF(arFont->c_str(), fontPx, &mergeCfg, arabicRange)) {
+                if (!io.Fonts->AddFontFromFileTTF(arFont->c_str(), arabicFontPx, &mergeCfg, arabicRange)) {
                     std::cerr << "[Font] Arabic merge font load failed: " << *arFont << std::endl;
                 }
             } else {
@@ -2297,34 +2340,35 @@ static void drawPresetPicker() {
     const bool compactMode = g.pickerCompactMode;
     const float outerPad = compactMode ? std::max(12.0f, 16.0f * scale) : std::max(16.0f, 22.0f * scale);
     const float blockGap = compactMode ? std::max(8.0f, 10.0f * scale) : std::max(12.0f, 14.0f * scale);
-    const float heroH = compactMode ? std::max(64.0f, 72.0f * scale) : std::max(84.0f, 96.0f * scale);
-    const float footerH = compactMode ? std::max(40.0f, 50.0f * scale) : std::max(46.0f, 58.0f * scale);
+    const float heroH = compactMode ? std::max(86.0f, 86.0f * scale) : std::max(112.0f, 112.0f * scale);
+    const float footerH = compactMode ? std::max(52.0f, 56.0f * scale) : std::max(58.0f, 66.0f * scale);
 
-    const char* heroTitle = visEnvText("ARDALI_VIS_PICKER_HERO_TITLE", L7("Curate the visual atmosphere", "Görsel atmosferi küratör gibi seçin", "Ù†Ø³Ù‚ Ø§Ù„Ø£Ø¬ÙˆØ§Ø¡ Ø§Ù„Ø¨ØµØ±ÙŠØ©", "Composez une atmosphère visuelle", "Gestalte die visuelle Stimmung", "Cura la atmósfera visual", "à¤µà¤¿à¤œà¤¼à¥à¤…à¤² à¤®à¤¾à¤¹à¥Œà¤² à¤šà¥à¤¨à¥‡à¤‚"));
+    const char* heroTitle = visEnvText("ARDALI_VIS_PICKER_HERO_TITLE", L7("Curate the visual atmosphere", "Görsel atmosferi küratör gibi seçin", "نسق الأجواء البصرية", "Composez une atmosphère visuelle", "Gestalte die visuelle Stimmung", "Cura la atmósfera visual", "à¤µà¤¿à¤œà¤¼à¥à¤…à¤² à¤®à¤¾à¤¹à¥Œà¤² à¤šà¥à¤¨à¥‡à¤‚"));
     const char* heroHint = visEnvText("ARDALI_VIS_PICKER_HINT", L7(
         "Choose the presets included in the premium-style auto switch flow.",
         "Otomatik geçiş akışına dahil olacak presetleri daha seçkin bir düzenle yönetin.",
-        "Ø­Ø¯Ø¯ Ø§Ù„Ù…Ø±Ø¦ÙŠØ§Øª Ø§Ù„ØªÙŠ Ø³ØªØ¯Ø®Ù„ ÙÙŠ Ø§Ù„ØªØ¨Ø¯ÙŠÙ„ Ø§Ù„ØªÙ„Ù‚Ø§Ø¦ÙŠ.",
+        "اختر المرئيات التي ستدخل في التبديل التلقائي.",
         "Choisissez les presets inclus dans la rotation automatique.",
         "Wähle die Presets für den automatischen Wechsel aus.",
         "Elige los presets incluidos en el cambio automático.",
         "à¤‘à¤Ÿà¥‹ à¤¸à¥à¤µà¤¿à¤š à¤®à¥‡à¤‚ à¤¶à¤¾à¤®à¤¿à¤² à¤¹à¥‹à¤¨à¥‡ à¤µà¤¾à¤²à¥‡ à¤ªà¥à¤°à¥€à¤¸à¥‡à¤Ÿ à¤šà¥à¤¨à¥‡à¤‚।"
     ));
-    const char* dirLabel = visEnvText("ARDALI_VIS_PICKER_PRESET_DIR", L7("Preset directory", "Preset dizini", "Ù…Ø¬Ù„Ø¯ Ø§Ù„Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª", "Dossier des préréglages", "Preset-Ordner", "Carpeta de presets", "à¤ªà¥à¤°à¥€à¤¸à¥‡à¤Ÿ à¤«à¤¼à¥‹à¤²à¥à¤¡à¤°"));
-    const char* searchHint = visEnvText("ARDALI_VIS_PICKER_SEARCH", L7("Search presets...", "Preset ara...", "Ø§Ø¨Ø­Ø« Ø¹Ù† preset...", "Rechercher un preset...", "Preset suchen...", "Buscar preset...", "à¤ªà¥à¤°à¥€à¤¸à¥‡à¤Ÿ à¤–à¥‹à¤œà¥‡à¤‚..."));
-    const char* delayLabel = visEnvText("ARDALI_VIS_PICKER_DELAY", L7("Switch delay", "Geçiş gecikmesi", "ØªØ£Ø®ÙŠØ± Ø§Ù„ØªØ¨Ø¯ÙŠÙ„", "Délai de rotation", "Wechselverzögerung", "Retraso de cambio", "à¤¸à¥à¤µà¤¿à¤š à¤¡à¥‡à¤²à¥‡"));
-    const char* compactLabel = visEnvText("ARDALI_VIS_PICKER_COMPACT", L7("Compact", "Kompakt", "Ù…Ø¯Ù…Ø¬", "Compact", "Kompakt", "Compacto", "à¤•à¥‰à¤®à¥à¤ªà¥ˆà¤•à¥à¤Ÿ"));
-    const char* enabledLabel = visEnvText("ARDALI_VIS_PICKER_ENABLED", L7("Enabled", "Etkin", "Ù…ÙÙØ¹Ù„", "Actif", "Aktiv", "Activo", "à¤¸à¤•à¥à¤°à¤¿à¤¯"));
-    const char* filterActiveLabel = visEnvText("ARDALI_VIS_PICKER_FILTER_ACTIVE", L7("Filter active:", "Filtre aktif:", "Ø§Ù„ÙÙ„ØªØ± Ù†Ø´Ø·:", "Filtre actif :", "Filter aktiv:", "Filtro activo:", "à¤«à¤¿à¤²à¥à¤Ÿà¤° à¤¸à¤•à¥à¤°à¤¿à¤¯:"));
-    const char* galleryLabel = visEnvText("ARDALI_VIS_PICKER_GALLERY", L7("Preset gallery", "Preset galerisi", "Ù…Ø¹Ø±Ø¶ preset", "Galerie de presets", "Preset-Galerie", "Galería de presets", "à¤ªà¥à¤°à¥€à¤¸à¥‡à¤Ÿ à¤—à¥ˆà¤²à¤°à¥€"));
-    const char* noMatchLabel = visEnvText("ARDALI_VIS_PICKER_NO_MATCH", L7("No preset matched your search.", "Aramanızla eşleşen preset bulunamadı.", "Ù„Ù… ÙŠÙØ¹Ø«Ø± Ø¹Ù„Ù‰ preset Ù…Ø·Ø§Ø¨Ù‚.", "Aucun preset ne correspond.", "Kein passendes Preset gefunden.", "No hay coincidencias.", "à¤•à¥‹à¤ˆ à¤®à¤¿à¤²à¤¾à¤¨ à¤¨à¤¹à¥€à¤‚ à¤®à¤¿à¤²à¤¾।"));
-    const char* inRotationLabel = visEnvText("ARDALI_VIS_PICKER_IN_ROTATION", L7("In rotation", "Döngüde", "ÙÙŠ Ø§Ù„Ø¯ÙˆØ±Ø§Ù†", "Dans la rotation", "In Rotation", "En rotación", "à¤°à¥‹à¤Ÿà¥‡à¤¶à¤¨ à¤®à¥‡à¤‚"));
-    const char* manualOnlyLabel = visEnvText("ARDALI_VIS_PICKER_MANUAL_ONLY", L7("Manual only", "Sadece manuel", "ÙŠØ¯ÙˆÙŠ ÙÙ‚Ø·", "Manuel uniquement", "Nur manuell", "Solo manual", "à¤¸à¤¿à¤°à¥à¤« à¤®à¥ˆà¤¨à¥à¤…à¤²"));
-    const char* includedTipLabel = visEnvText("ARDALI_VIS_PICKER_INCLUDED", L7("Included in auto-switch", "Otomatik geçişe dahil", "Ù…Ø¶Ù…Ù† ÙÙŠ Ø§Ù„ØªØ¨Ø¯ÙŠÙ„ Ø§Ù„ØªÙ„Ù‚Ø§Ø¦ÙŠ", "Inclus dans la rotation auto", "Im Auto-Wechsel enthalten", "Incluido en auto-cambio", "à¤‘à¤Ÿà¥‹ à¤¸à¥à¤µà¤¿à¤š à¤®à¥‡à¤‚ à¤¶à¤¾à¤®à¤¿à¤²"));
+    const char* dirLabel = visEnvText("ARDALI_VIS_PICKER_PRESET_DIR", L7("Preset directory", "Preset dizini", "مجلد الإعدادات", "Dossier des préréglages", "Preset-Ordner", "Carpeta de presets", "à¤ªà¥à¤°à¥€à¤¸à¥‡à¤Ÿ à¤«à¤¼à¥‹à¤²à¥à¤¡à¤°"));
+    const char* searchHint = visEnvText("ARDALI_VIS_PICKER_SEARCH", L7("Search presets...", "Preset ara...", "ابحث عن preset...", "Rechercher un preset...", "Preset suchen...", "Buscar preset...", "à¤ªà¥à¤°à¥€à¤¸à¥‡à¤Ÿ à¤–à¥‹à¤œà¥‡à¤‚..."));
+    const char* delayLabel = visEnvText("ARDALI_VIS_PICKER_DELAY", L7("Switch delay", "Geçiş gecikmesi", "تأخير التبديل", "Délai de rotation", "Wechselverzögerung", "Retraso de cambio", "à¤¸à¥à¤µà¤¿à¤š à¤¡à¥‡à¤²à¥‡"));
+    const char* compactLabel = visEnvText("ARDALI_VIS_PICKER_COMPACT", L7("Compact", "Kompakt", "مضغوط", "Compact", "Kompakt", "Compacto", "à¤•à¥‰à¤®à¥à¤ªà¥ˆà¤•à¥à¤Ÿ"));
+    const char* enabledLabel = visEnvText("ARDALI_VIS_PICKER_ENABLED", L7("Enabled", "Etkin", "مفعل", "Actif", "Aktiv", "Activo", "à¤¸à¤•à¥à¤°à¤¿à¤¯"));
+    const char* filterActiveLabel = visEnvText("ARDALI_VIS_PICKER_FILTER_ACTIVE", L7("Filter active:", "Filtre aktif:", "الفلتر نشط:", "Filtre actif :", "Filter aktiv:", "Filtro activo:", "à¤«à¤¿à¤²à¥à¤Ÿà¤° à¤¸à¤•à¥à¤°à¤¿à¤¯:"));
+    const char* galleryLabel = visEnvText("ARDALI_VIS_PICKER_GALLERY", L7("Preset gallery", "Preset galerisi", "معرض preset", "Galerie de presets", "Preset-Galerie", "Galería de presets", "à¤ªà¥à¤°à¥€à¤¸à¥‡à¤Ÿ à¤—à¥ˆà¤²à¤°à¥€"));
+    const char* noMatchLabel = visEnvText("ARDALI_VIS_PICKER_NO_MATCH", L7("No preset matched your search.", "Aramanızla eşleşen preset bulunamadı.", "لم يتم العثور على preset مطابق.", "Aucun preset ne correspond.", "Kein passendes Preset gefunden.", "No hay coincidencias.", "à¤•à¥‹à¤ˆ à¤®à¤¿à¤²à¤¾à¤¨ à¤¨à¤¹à¥€à¤‚ à¤®à¤¿à¤²à¤¾।"));
+    const char* inRotationLabel = visEnvText("ARDALI_VIS_PICKER_IN_ROTATION", L7("In rotation", "Döngüde", "ضمن التدوير", "Dans la rotation", "In Rotation", "En rotación", "à¤°à¥‹à¤Ÿà¥‡à¤¶à¤¨ à¤®à¥‡à¤‚"));
+    const char* manualOnlyLabel = visEnvText("ARDALI_VIS_PICKER_MANUAL_ONLY", L7("Manual only", "Sadece manuel", "يدوي فقط", "Manuel uniquement", "Nur manuell", "Solo manual", "à¤¸à¤¿à¤°à¥à¤« à¤®à¥ˆà¤¨à¥à¤…à¤²"));
+    const char* includedTipLabel = visEnvText("ARDALI_VIS_PICKER_INCLUDED", L7("Included in auto-switch", "Otomatik geçişe dahil", "ضمن التبديل التلقائي", "Inclus dans la rotation auto", "Im Auto-Wechsel enthalten", "Incluido en auto-cambio", "à¤‘à¤Ÿà¥‹ à¤¸à¥à¤µà¤¿à¤š à¤®à¥‡à¤‚ à¤¶à¤¾à¤®à¤¿à¤²"));
     static uint64_t pickerAppearMs = 0;
     if (ImGui::IsWindowAppearing()) {
         pickerAppearMs = nowMs();
     }
+    const bool pickerWarmup = (g.pickerOpenMs != 0 && (nowMs() - g.pickerOpenMs) < 180);
     float appearNorm = std::clamp((float)(nowMs() - pickerAppearMs) / 420.0f, 0.0f, 1.0f);
     float appearEase = 1.0f - (1.0f - appearNorm) * (1.0f - appearNorm);
 
@@ -2335,10 +2379,16 @@ static void drawPresetPicker() {
 
     std::vector<int> visibleIndices;
     visibleIndices.reserve(g.presets.size());
-    for (int i = 0; i < (int)g.presets.size(); i++) {
-        const std::string searchableName = stripMilkExtension(g.presets[i].displayName);
-        if (stringContainsCaseInsensitiveAscii(searchableName, g.pickerSearchBuf.data())) {
-            visibleIndices.push_back(i);
+    if (pickerWarmup) {
+        if (!g.presets.empty()) {
+            visibleIndices.push_back(std::clamp(g.currentPreset, 0, (int)g.presets.size() - 1));
+        }
+    } else {
+        for (int i = 0; i < (int)g.presets.size(); i++) {
+            const std::string searchableName = stripMilkExtension(g.presets[i].displayName);
+            if (stringContainsCaseInsensitiveAscii(searchableName, g.pickerSearchBuf.data())) {
+                visibleIndices.push_back(i);
+            }
         }
     }
 
@@ -2420,19 +2470,19 @@ static void drawPresetPicker() {
         rootDl->AddCircleFilled(ImVec2(heroPos.x + heroSize.x - 44.0f * scale, heroPos.y + 34.0f * scale), 32.0f * scale, col32(pal.accent, 0.12f), 36);
 
         ImGui::Dummy(heroSize);
-        ImGui::SetCursorScreenPos(ImVec2(heroPos.x + 16.0f * scale, heroPos.y + (compactMode ? 8.0f : 12.0f) * scale));
+        ImGui::SetCursorScreenPos(ImVec2(heroPos.x + 18.0f * scale, heroPos.y + (compactMode ? 12.0f : 16.0f) * scale));
         ImGui::PushStyleColor(ImGuiCol_Text, pal.text);
         ImGui::TextUnformatted(heroTitle);
         ImGui::PopStyleColor();
 
         if (!compactMode) {
-            ImGui::SetCursorScreenPos(ImVec2(heroPos.x + 16.0f * scale, heroPos.y + 36.0f * scale));
+            ImGui::SetCursorScreenPos(ImVec2(heroPos.x + 18.0f * scale, heroPos.y + 46.0f * scale));
             ImGui::PushTextWrapPos(heroPos.x + heroSize.x - 120.0f * scale);
             ImGui::TextDisabled("%s", heroHint);
             ImGui::PopTextWrapPos();
         }
 
-        ImGui::SetCursorScreenPos(ImVec2(heroPos.x + 16.0f * scale, heroPos.y + heroSize.y - (compactMode ? 22.0f : 24.0f) * scale));
+        ImGui::SetCursorScreenPos(ImVec2(heroPos.x + 18.0f * scale, heroPos.y + heroSize.y - (compactMode ? 32.0f : 34.0f) * scale));
         ImGui::TextDisabled("%s:", dirLabel);
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Text, pal.accent);
@@ -2451,18 +2501,18 @@ static void drawPresetPicker() {
     ImGui::Dummy(ImVec2(0, compactMode ? std::max(6.0f, 8.0f * scale) : std::max(8.0f, 10.0f * scale)));
     {
         ImVec2 controlPos = ImGui::GetCursorScreenPos();
-        ImVec2 controlSize(ImGui::GetContentRegionAvail().x, (compactMode ? 50.0f : 58.0f) * scale);
+        ImVec2 controlSize(ImGui::GetContentRegionAvail().x, std::max(compactMode ? 64.0f : 72.0f, (compactMode ? 64.0f : 72.0f) * scale));
         rootDl->AddRectFilled(controlPos, ImVec2(controlPos.x + controlSize.x, controlPos.y + controlSize.y), col32(pal.panelBgAlt, 0.90f), 14.0f * scale);
         rootDl->AddRect(controlPos, ImVec2(controlPos.x + controlSize.x, controlPos.y + controlSize.y), col32(pal.border, 0.55f), 14.0f * scale, 0, 1.0f);
         ImGui::Dummy(controlSize);
 
-        float delayBlockW = std::max(230.0f, 240.0f * scale);
-        float compactBtnW = std::max(88.0f, 94.0f * scale);
+        float delayBlockW = std::max(286.0f, 292.0f * scale);
+        float compactBtnW = std::max(118.0f, 122.0f * scale);
         float searchW = std::max(120.0f, controlSize.x - delayBlockW - compactBtnW - 34.0f * scale);
 
-        ImGui::SetCursorScreenPos(ImVec2(controlPos.x + 12.0f * scale, controlPos.y + (compactMode ? 8.0f : 10.0f) * scale));
+        ImGui::SetCursorScreenPos(ImVec2(controlPos.x + 14.0f * scale, controlPos.y + (compactMode ? 12.0f : 14.0f) * scale));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f * scale);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f * scale, (compactMode ? 7.0f : 9.0f) * scale));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f * scale, (compactMode ? 10.0f : 12.0f) * scale));
         ImGui::PushStyleColor(ImGuiCol_FrameBg, pal.frameBg);
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, pal.frameBgHovered);
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive, pal.frameBgActive);
@@ -2474,8 +2524,8 @@ static void drawPresetPicker() {
         ImGui::PopStyleColor(3);
         ImGui::PopStyleVar(2);
 
-        ImGui::SetCursorScreenPos(ImVec2(controlPos.x + 16.0f * scale + searchW, controlPos.y + (compactMode ? 8.0f : 10.0f) * scale));
-        if (ImGui::Button(compactLabel, ImVec2(compactBtnW, (compactMode ? 30.0f : 34.0f) * scale))) {
+        ImGui::SetCursorScreenPos(ImVec2(controlPos.x + 16.0f * scale + searchW, controlPos.y + (compactMode ? 12.0f : 14.0f) * scale));
+        if (ImGui::Button(compactLabel, ImVec2(compactBtnW, std::max(compactMode ? 40.0f : 44.0f, (compactMode ? 40.0f : 44.0f) * scale)))) {
             g.pickerCompactMode = !g.pickerCompactMode;
             savePresetPickerSettings();
         }
@@ -2491,9 +2541,9 @@ static void drawPresetPicker() {
         };
 
         float delayX = controlPos.x + controlSize.x - delayBlockW + 10.0f * scale;
-        ImGui::SetCursorScreenPos(ImVec2(delayX, controlPos.y + (compactMode ? 5.0f : 7.0f) * scale));
+        ImGui::SetCursorScreenPos(ImVec2(delayX, controlPos.y + (compactMode ? 8.0f : 10.0f) * scale));
         ImGui::TextDisabled("%s", delayLabel);
-        ImGui::SetCursorScreenPos(ImVec2(delayX + 106.0f * scale, controlPos.y + (compactMode ? 2.0f : 4.0f) * scale));
+        ImGui::SetCursorScreenPos(ImVec2(delayX + 128.0f * scale, controlPos.y + (compactMode ? 8.0f : 10.0f) * scale));
         char delayDigits[16];
         std::snprintf(delayDigits, sizeof(delayDigits), "%d", g.delaySeconds);
         const float valueW = std::max(38.0f * scale, ImGui::CalcTextSize(delayDigits).x + 20.0f * scale);
@@ -2533,7 +2583,7 @@ static void drawPresetPicker() {
 
     ImGui::Dummy(ImVec2(0, blockGap));
 
-    const float listHeaderH = (compactMode ? 26.0f : 32.0f) * scale;
+    const float listHeaderH = std::max(compactMode ? 36.0f : 42.0f, (compactMode ? 36.0f : 42.0f) * scale);
     const float listFooterReserve = footerH + blockGap;
     const float listH = std::max(170.0f, ImGui::GetContentRegionAvail().y - listFooterReserve);
     {
@@ -2555,9 +2605,9 @@ static void drawPresetPicker() {
                 ImGui::TextDisabled("%s", noMatchLabel);
             } else {
                 ImDrawList* listDl = ImGui::GetWindowDrawList();
-                const float rowH = compactMode ? std::max(42.0f, 46.0f * scale) : std::max(52.0f, 58.0f * scale);
-                const float cardGap = compactMode ? std::max(5.0f, 6.0f * scale) : std::max(8.0f, 10.0f * scale);
-                const float cbSize = compactMode ? std::clamp(16.0f * scale, 14.0f, 20.0f) : std::clamp(18.0f * scale, 16.0f, 24.0f);
+                const float rowH = compactMode ? std::max(58.0f, 62.0f * scale) : std::max(68.0f, 74.0f * scale);
+                const float cardGap = compactMode ? std::max(8.0f, 9.0f * scale) : std::max(10.0f, 12.0f * scale);
+                const float cbSize = compactMode ? std::clamp(22.0f * scale, 20.0f, 28.0f) : std::clamp(24.0f * scale, 22.0f, 32.0f);
 
                 ImGuiListClipper clipper;
                 clipper.Begin((int)visibleIndices.size(), rowH + cardGap);
@@ -2612,7 +2662,7 @@ static void drawPresetPicker() {
                             ImGui::SetTooltip("%s", includedTipLabel);
                         }
 
-                        const float coverW = compactMode ? std::max(40.0f, 46.0f * scale) : std::max(54.0f, 66.0f * scale);
+                        const float coverW = compactMode ? std::max(52.0f, 56.0f * scale) : std::max(64.0f, 72.0f * scale);
                         const float coverH = rowH - (compactMode ? 10.0f : 14.0f) * scale;
                         ImVec2 coverMin(cbMax.x + 12.0f * scale, rowMin.y + (rowH - coverH) * 0.5f);
                         ImVec2 coverMax(coverMin.x + coverW, coverMin.y + coverH);
@@ -2634,7 +2684,7 @@ static void drawPresetPicker() {
                         float textW = std::max(80.0f, rowW - (contentX - rowMin.x) - actionW - 16.0f * scale);
                         ImVec2 actionPos(rowMax.x - actionW, rowMin.y + 11.0f * scale);
                         ImVec2 actionMax(actionPos.x + (compactMode ? 32.0f : 40.0f) * scale, actionPos.y + 28.0f * scale);
-                        ImVec2 textPos(contentX, compactMode ? (rowMin.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f - 1.0f * scale) : (rowMin.y + 10.0f * scale));
+                        ImVec2 textPos(contentX, compactMode ? (rowMin.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f - 1.0f * scale) : (rowMin.y + 14.0f * scale));
                         if (rowHovered && !isCurrent) {
                             listDl->AddRectFilled(rowMin, rowMax, col32a(pal.accent, std::min(64, rowAlpha)), 14.0f * scale);
                         }
@@ -2734,7 +2784,7 @@ static void drawPresetPicker() {
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, pal.buttonHovered);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, pal.buttonActive);
 
-    if (ImGui::Button(visEnvText("ARDALI_VIS_PICKER_ALL", L7("Select all", "Tümünü seç", "ØªØ­Ø¯ÙŠØ¯ Ø§Ù„ÙƒÙ„", "Tout sélectionner", "Alle wählen", "Seleccionar todo", "à¤¸à¤­à¥€ à¤šà¥à¤¨à¥‡à¤‚")))) {
+    if (ImGui::Button(visEnvText("ARDALI_VIS_PICKER_ALL", L7("Select all", "Tümünü seç", "تحديد الكل", "Tout sélectionner", "Alle wählen", "Seleccionar todo", "à¤¸à¤­à¥€ à¤šà¥à¤¨à¥‡à¤‚")))) {
         for (auto& p : g.presets) p.enabled = true;
         // Baştan başlat: ilk presetten devam et.
         if (!g.presets.empty()) {
@@ -2747,13 +2797,13 @@ static void drawPresetPicker() {
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button(visEnvText("ARDALI_VIS_PICKER_NONE", L7("Clear all", "Tümünü temizle", "Ù…Ø³Ø­ Ø§Ù„ÙƒÙ„", "Tout effacer", "Alles leeren", "Limpiar todo", "à¤¸à¤­à¥€ à¤¹à¤Ÿà¤¾à¤à¤")))) {
+    if (ImGui::Button(visEnvText("ARDALI_VIS_PICKER_NONE", L7("Clear all", "Tümünü temizle", "مسح الكل", "Tout effacer", "Alles leeren", "Limpiar todo", "à¤¸à¤­à¥€ à¤¹à¤Ÿà¤¾à¤à¤")))) {
         for (auto& p : g.presets) p.enabled = false;
         g.nextAutoSwitchMs = 0;
         g.pickerNavIndex = -1;
     }
 
-    const char* okText = visEnvText("ARDALI_VIS_PICKER_OK", L7("Done", "Tamam", "ØªÙ…", "Terminer", "Fertig", "Listo", "à¤ªà¥‚à¤°à¤¾"));
+    const char* okText = visEnvText("ARDALI_VIS_PICKER_OK", L7("Done", "Tamam", "تم", "Terminer", "Fertig", "Listo", "à¤ªà¥‚à¤°à¤¾"));
     float btnW = std::max(96.0f * scale, ImGui::CalcTextSize(okText).x + ImGui::GetStyle().FramePadding.x * 2.0f);
     float rightX = ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - btnW);
     rightX = std::max(ImGui::GetCursorPosX(), rightX);
@@ -2804,7 +2854,32 @@ static bool tryCreateContextForWindow(SDL_Window* w, SDL_GLContext& outCtx) {
 }
 
 static bool ensurePickerWindow() {
-    if (g.pickerWindow && g.pickerGL && g.pickerImGui) return true;
+    if (g.pickerWindow && g.pickerGL && g.pickerImGui) {
+        if (g.showPresetPicker && !g.pickerVisible) {
+            int wx = 0, wy = 0, ww = 0, wh = 0;
+            if (g.window) {
+                SDL_GetWindowPosition(g.window, &wx, &wy);
+                SDL_GetWindowSize(g.window, &ww, &wh);
+            }
+            int pw = g.pickerWinW;
+            int ph = g.pickerWinH;
+            SDL_GetWindowSize(g.pickerWindow, &pw, &ph);
+            const int dockGap = 18;
+            const int targetX = wx + ww + dockGap;
+            const int targetY = wy + 42;
+            SDL_SetWindowPosition(g.pickerWindow, targetX, targetY);
+            SDL_ShowWindow(g.pickerWindow);
+            g.pickerVisible = true;
+            g.pickerDockAnimating = false;
+            g.pickerDockAnimStartMs = nowMs();
+            g.pickerOpenMs = g.pickerDockAnimStartMs;
+            g.lastPickerRenderMs = 0;
+            g.pickerDockFromX = targetX;
+            g.pickerDockToX = targetX;
+            g.pickerDockY = targetY;
+        }
+        return true;
+    }
 
     // Mevcut GL context'ini (muhtemelen ana pencere) yedekle ve dönmeden önce geri yükle.
     SDL_Window* backupWindow = SDL_GL_GetCurrentWindow();
@@ -2834,23 +2909,17 @@ static bool ensurePickerWindow() {
         desiredH = std::clamp(desiredH, 360, 1080);
     }
 
-    // Picker penceresi daha uzunsa ana görselleştirici de aynı yükseklikte kalsın.
-    if (g.window && desiredH > g.mainPrefH) {
-        g.mainPrefH = desiredH;
-        SDL_SetWindowSize(g.window, g.mainPrefW, g.mainPrefH);
-    }
-
     const int dockGap = 18;
     const int targetX = wx + ww + dockGap;
     const int targetY = wy + 42;
 
-    Uint32 pickerFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    Uint32 pickerFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_HIDDEN;
 
 			    g.pickerWindow = SDL_CreateWindow(
 		        visEnvText("ARDALI_VIS_PICKER_TITLE", L7Raw(
 		            "ArDali Visuals",
             "ArDali G\u00F6rseller",
-		            "Ù…Ø±Ø¦ÙŠØ§Øª ArDali",
+		            "مرئيات ArDali",
 		            "Visuels ArDali",
 		            "ArDali Visuals",
 		            "Visuales de ArDali",
@@ -2898,17 +2967,15 @@ static bool ensurePickerWindow() {
 #endif
     // ────────────────────────────────────────────────────────────────────────────
 
-    // Pencereyi artık gösterebiliriz (Wayland app_id attach edildi)
-    // SDL_ShowWindow(g.pickerWindow); // Removed since window is already shown without HIDDEN flag
-
     // Bazı WM'ler önceki boyutu geri yükleyebilir; istenen boyutu zorla.
     SDL_SetWindowSize(g.pickerWindow, desiredW, desiredH);
-    // Sağdan çekmece efekti: önce hedefin sağında başlat, sonra kaydır.
-    const int startX = targetX + desiredW + 12;
-    SDL_SetWindowPosition(g.pickerWindow, startX, targetY);
-    g.pickerDockAnimating = true;
+    SDL_SetWindowPosition(g.pickerWindow, targetX, targetY);
+    g.pickerDockAnimating = false;
     g.pickerDockAnimStartMs = nowMs();
-    g.pickerDockFromX = startX;
+    g.pickerOpenMs = g.pickerDockAnimStartMs;
+    g.lastPickerRenderMs = 0;
+    g.pickerVisible = false;
+    g.pickerDockFromX = targetX;
     g.pickerDockToX = targetX;
     g.pickerDockY = targetY;
 
@@ -2970,6 +3037,10 @@ static bool ensurePickerWindow() {
 
     // Önceki GL context'i geri yükle; projectM ana context'te render etmeye devam etsin.
     if (backupWindow && backupContext) SDL_GL_MakeCurrent(backupWindow, backupContext);
+    if (g.showPresetPicker) {
+        SDL_ShowWindow(g.pickerWindow);
+        g.pickerVisible = true;
+    }
     return true;
 }
 
@@ -2998,6 +3069,8 @@ static void destroyPickerWindow() {
     SDL_DestroyWindow(g.pickerWindow);
     g.pickerWindow = nullptr;
     g.pickerDockAnimating = false;
+    g.pickerVisible = false;
+    g.pickerPrewarmed = false;
 
     // Ana pencere çalışırken ImGui'yi null mevcut context'te bırakma.
     if (g.mainImGui) {
@@ -3008,8 +3081,16 @@ static void destroyPickerWindow() {
     if (backupWindow && backupContext) SDL_GL_MakeCurrent(backupWindow, backupContext);
 }
 
+static void hidePickerWindow() {
+    if (!g.pickerWindow) return;
+    SDL_HideWindow(g.pickerWindow);
+    g.pickerVisible = false;
+    g.pickerDockAnimating = false;
+}
+
 static void updatePickerDockMotion() {
     if (!g.pickerWindow || !g.window) return;
+    if (!g.pickerDockAnimating) return;
 
     int wx = 0, wy = 0, ww = 0, wh = 0;
     SDL_GetWindowPosition(g.window, &wx, &wy);
@@ -3109,7 +3190,7 @@ static bool initMainWindowAndGL() {
 	        L7Raw(
 	            "ArDali Visualizer",
             "ArDali G\u00F6rselle\u015Ftirici",
-	            "Ù…Ø±Ø¦ÙŠØ§Øª Ø£ÙˆØ±ÙŠÙÙˆ",
+	            "مرئيات ArDali",
 	            "Visualiseur ArDali",
 	            "ArDali-Visualizer",
 	            "Visualizador ArDali",
@@ -3488,6 +3569,7 @@ int main(int argc, char* argv[]) {
     scheduleNextAutoSwitch();
 
     SDL_Event e;
+    const uint64_t appStartedMs = nowMs();
     while (g.running) {
         uint64_t frameStartMs = nowMs();
 
@@ -3496,7 +3578,7 @@ int main(int argc, char* argv[]) {
 
         // Gelen PCM'i (bloklamadan) al ve projectM'e besle.
         pumpPcmFromStdin();
-        feedSilenceIfStale(frameStartMs);
+        feedFallbackPcmIfStale(frameStartMs);
         while (SDL_PollEvent(&e)) {
             // Olayları, ait oldukları SDL penceresine göre doğru ImGui context'ine yönlendir.
             Uint32 wid = getEventWindowId(e);
@@ -3548,6 +3630,14 @@ int main(int argc, char* argv[]) {
 
         enforceMainWindowInitialSize();
 
+        if (!g.pickerPrewarmed && !g.showPresetPicker && nowMs() - appStartedMs > 650) {
+            if (ensurePickerWindow()) {
+                g.pickerPrewarmed = true;
+                hidePickerWindow();
+                if (g.debugOverlay) std::cout << "[Picker] prewarmed hidden window" << std::endl;
+            }
+        }
+
         // Seçici ayarlarını kapanışta kalıcı yap (Tamam / ESC / pencere kapat düğmesi).
         static bool wasPickerOpen = false;
         if (wasPickerOpen && !g.showPresetPicker) {
@@ -3564,7 +3654,7 @@ int main(int argc, char* argv[]) {
                 updatePickerDockMotion();
             }
         } else {
-            if (g.pickerWindow) destroyPickerWindow();
+            if (g.pickerVisible) hidePickerWindow();
         }
 
         updateDrawable();
@@ -3644,32 +3734,37 @@ int main(int argc, char* argv[]) {
         SDL_GL_SwapWindow(g.window);
 
         // Seçici pencereyi kendi GL context'i + ImGui context'i içinde render et.
-        if (g.pickerWindow && g.pickerGL && g.pickerImGui) {
-            SDL_GL_MakeCurrent(g.pickerWindow, g.pickerGL);
-            ImGui::SetCurrentContext(g.pickerImGui);
+        if (g.pickerVisible && g.pickerWindow && g.pickerGL && g.pickerImGui) {
+            const uint64_t pickerNow = nowMs();
+            const uint64_t pickerFrameMs = g.pickerDockAnimating ? 16 : 33;
+            if (g.lastPickerRenderMs == 0 || pickerNow - g.lastPickerRenderMs >= pickerFrameMs) {
+                g.lastPickerRenderMs = pickerNow;
+                SDL_GL_MakeCurrent(g.pickerWindow, g.pickerGL);
+                ImGui::SetCurrentContext(g.pickerImGui);
 
-            updateDrawablePicker();
-            if (!g.fontPath.empty() && std::fabs(g.pickerDpiScale - g.pickerLastDpiScale) > 0.001f) {
-                rescaleImGui(g.pickerDpiScale);
-                g.pickerLastDpiScale = g.pickerDpiScale;
+                updateDrawablePicker();
+                if (!g.fontPath.empty() && std::fabs(g.pickerDpiScale - g.pickerLastDpiScale) > 0.001f) {
+                    rescaleImGui(g.pickerDpiScale);
+                    g.pickerLastDpiScale = g.pickerDpiScale;
+                }
+
+                ImGui_ImplOpenGL3_NewFrame();
+                ImGui_ImplSDL2_NewFrame();
+                ImGui::NewFrame();
+
+                drawPresetPicker();
+
+                glViewport(0, 0, g.pickerFbW, g.pickerFbH);
+                glClearColor(0, 0, 0, 1);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                ImGui::Render();
+                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+                SDL_GL_SwapWindow(g.pickerWindow);
+
+                // Ana context'i geri yükle
+                ImGui::SetCurrentContext(g.mainImGui);
+                SDL_GL_MakeCurrent(g.window, g.gl);
             }
-
-            ImGui_ImplOpenGL3_NewFrame();
-            ImGui_ImplSDL2_NewFrame();
-            ImGui::NewFrame();
-
-            drawPresetPicker();
-
-            glViewport(0, 0, g.pickerFbW, g.pickerFbH);
-            glClearColor(0, 0, 0, 1);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            ImGui::Render();
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-            SDL_GL_SwapWindow(g.pickerWindow);
-
-            // Ana context'i geri yükle
-            ImGui::SetCurrentContext(g.mainImGui);
-            SDL_GL_MakeCurrent(g.window, g.gl);
         }
 
         // Seçilen hedef FPS'e göre basit kare limiti.

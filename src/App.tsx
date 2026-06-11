@@ -4,21 +4,22 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleHelp,
-  Download,
+  Clock3,
   Film,
   FolderPlus,
   Globe2,
   Grid2X2,
   Image,
+  Keyboard,
   ListMusic,
   Maximize2,
   Music2,
   Pause,
   Play,
-  Radio,
   RefreshCw,
   Repeat,
   Repeat1,
+  Rewind,
   RotateCcw,
   RotateCw,
   Search,
@@ -27,6 +28,7 @@ import {
   SkipBack,
   SkipForward,
   SlidersHorizontal,
+  Sparkles,
   Store,
   Sun,
   Trash2,
@@ -40,9 +42,9 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { ChangeEvent, memo, MouseEvent as ReactMouseEvent, ReactNode, RefObject, UIEvent as ReactUIEvent, useCallback, useEffect, useMemo, useRef, useState, WheelEvent as ReactWheelEvent } from "react";
+import { ChangeEvent, memo, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject, UIEvent as ReactUIEvent, useCallback, useEffect, useMemo, useRef, useState, WheelEvent as ReactWheelEvent } from "react";
 import { flushSync } from "react-dom";
-import { applyWebDaliEffects, clearWebData, hideWeb, navigateWebHistory, onWindowResize, openPlatform, parkWeb, platforms, setWebChromeVisibility, type WebDaliPayload, type WebPlatform } from "./web/webManager";
+import { applyWebDaliEffects, clearWebData, getWebDaliRawPcm, getWebDaliRawSpectrum, hideWeb, navigateWebHistory, onWindowResize, openPlatform, parkWeb, platforms, setWebChromeVisibility, type WebDaliPayload, type WebPlatform } from "./web/webManager";
 import {
   applyOfficialPluginsForUrl,
   ARDALI_STORE_PLATFORM_ID,
@@ -51,7 +53,7 @@ import {
   setPluginInstalled,
   type ArdaliStoreItem,
 } from "./web/pluginManager";
-import { defaultWebSettings, loadWebSettings, resetWebSettings, saveWebSettings, WEB_SETTINGS_EVENT, type WebSettings } from "./web/webSettings";
+import { defaultWebSettings, loadWebSettings, resetWebSettings, saveWebSettings, WEB_SETTINGS_EVENT, type AppLanguage, type AppTheme, type StartupPage, type WebSettings } from "./web/webSettings";
 
 type PageId =
   | "files"
@@ -59,9 +61,17 @@ type PageId =
   | "music"
   | "gallery"
   | "web"
-  | "listen"
-  | "downloads"
   | "settings";
+
+type ResizeDirection =
+  | "East"
+  | "North"
+  | "NorthEast"
+  | "NorthWest"
+  | "South"
+  | "SouthEast"
+  | "SouthWest"
+  | "West";
 
 type Track = {
   id: string;
@@ -405,13 +415,11 @@ declare global {
   }
 }
 
-const railItems: Array<{ id: PageId; label: string; icon: typeof Video }> = [
-  { id: "video", label: "Videolar", icon: Video },
-  { id: "music", label: "Muzik", icon: Music2 },
-  { id: "gallery", label: "Galeri", icon: Image },
-  { id: "web", label: "Web", icon: Globe2 },
-  { id: "listen", label: "Dinleyerek bul", icon: Radio },
-  { id: "downloads", label: "Indirme", icon: Download },
+const railItems: Array<{ id: PageId; labelKey: string; icon: typeof Video }> = [
+  { id: "video", labelKey: "rail.video", icon: Video },
+  { id: "music", labelKey: "rail.music", icon: Music2 },
+  { id: "gallery", labelKey: "rail.gallery", icon: Image },
+  { id: "web", labelKey: "rail.web", icon: Globe2 },
 ];
 
 type MusicViewMode = "list" | "compact" | "comfortable" | "cards";
@@ -1074,10 +1082,8 @@ function isEqPresetId(value: unknown): value is EqPresetId {
   return typeof value === "string" && value in eqPresets;
 }
 
-function getSoundEffectsWindowTitle(scope: string) {
-  if (scope === "video") return "Ses Efektleri (Video) - ArDali";
-  if (scope === "web") return "Ses Efektleri (Web) - ArDali";
-  return "Ses Efektleri (Muzik) - ArDali";
+function getSoundEffectsWindowTitle(scope: string, language: AppLanguage = "tr-TR") {
+  return formatLabel(tr(language, "sfx.windowTitle"), { scope: tr(language, `sfx.scope.${normalizeSfxScope(scope)}`) });
 }
 
 function isSoundEffectsView() {
@@ -1271,6 +1277,16 @@ function outputGainWithPreamp(volume: number, settings: DspSettings) {
   return Math.max(0, Math.min(4, volume * dbToLinear(preampDb)));
 }
 
+function bassHeadroomDb(eqGains: number[], bassGain: number, bassMix: number) {
+  const lowWeights = [1, 0.98, 0.94, 0.88, 0.78, 0.64, 0.48, 0.32];
+  const lowEqLift = lowWeights.reduce((sum, weight, index) => {
+    return sum + Math.max(0, Number(eqGains[index]) || 0) * weight;
+  }, 0) / lowWeights.length;
+  const effectiveBass = Math.max(0, Number(bassGain) || 0) * (Math.max(0, Math.min(100, Number(bassMix) || 0)) / 100);
+  const trimDb = effectiveBass * 0.18 + lowEqLift * 0.42;
+  return Math.max(0, Math.min(3.2, trimDb));
+}
+
 function buildBroadcastFromSfx(panels: Record<SfxEffectId, SfxPanelDefinition>, masterEnabled: boolean): SfxBroadcastState {
   return buildBroadcastFromSfxState(panels, masterEnabled, flatEq, "flat");
 }
@@ -1304,6 +1320,11 @@ function buildBroadcastFromSfxState(
   const bitDitherPanel = panels.bitdither;
   const tapePanel = panels.tapesat;
   const surroundPanel = panels.surround;
+  const moduleBassGain = getPanelParam(eqPanel, "bass");
+  const bassBoostActive = bassPanel.enabled === true || moduleBassGain > 0.01;
+  const bassGain = bassPanel.enabled ? getPanelParam(bassPanel, "gain") : Math.max(0, moduleBassGain);
+  const bassMix = bassPanel.enabled ? getPanelParam(bassPanel, "mix") : 72;
+  const preampDb = getPanelParam(audiophilePanel, "preamp") - bassHeadroomDb(eqGains, bassGain, bassMix);
   const activeReverbMix = Math.max(
     reverbPanel.enabled ? Math.min(0.55, Math.max(0, (getPanelParam(reverbPanel, "wetDry") + 60) / 120)) : 0,
     echoPanel.enabled ? Math.min(0.48, Math.max(0, getPanelParam(echoPanel, "wetDry") / 210)) : 0,
@@ -1316,13 +1337,13 @@ function buildBroadcastFromSfxState(
     eqPresetLabel,
     eqGains: normalizedEqBands(eqGains),
     dspSettings: {
-      preampDb: getPanelParam(audiophilePanel, "preamp"),
+      preampDb,
       outputDevice: getPanelOption(audiophilePanel, "outputDevice") || "default",
       sampleRate: getPanelOption(audiophilePanel, "sampleRate") || "auto",
-      bassBoost: bassPanel.enabled ? getPanelParam(bassPanel, "gain") : getPanelParam(eqPanel, "bass"),
-      bassFrequency: bassPanel.enabled ? getPanelParam(bassPanel, "frequency") : 82,
-      bassMix: bassPanel.enabled ? getPanelParam(bassPanel, "mix") : 72,
-      bassBoostEnabled: bassPanel.enabled === true,
+      bassBoost: bassPanel.enabled ? bassGain : moduleBassGain,
+      bassFrequency: bassPanel.enabled ? getPanelParam(bassPanel, "frequency") : 100,
+      bassMix,
+      bassBoostEnabled: bassBoostActive,
       midGain: getPanelParam(eqPanel, "mid"),
       trebleGain: getPanelParam(eqPanel, "treble"),
       stereoWidth: widenerPanel.enabled ? getPanelParam(widenerPanel, "width") : getPanelParam(eqPanel, "stereoExpander"),
@@ -1586,29 +1607,1532 @@ type SettingsTabId =
   | "web"
   | "playback"
   | "keyboard"
-  | "listen"
   | "behavior"
-  | "security"
-  | "library"
-  | "gallery"
-  | "audio";
+  | "security";
 
-const settingsTabs: Array<{ id: SettingsTabId; label: string; icon: ReactNode }> = [
-  { id: "web", label: "Web Ayarları", icon: <Globe2 size={17} /> },
-  { id: "playback", label: "Oynat", icon: <Play size={17} /> },
-  { id: "keyboard", label: "Klavye Kısayolları", icon: <Grid2X2 size={17} /> },
-  { id: "listen", label: "Dinle", icon: <Radio size={17} /> },
-  { id: "behavior", label: "Davranış", icon: <SlidersHorizontal size={17} /> },
-  { id: "security", label: "Güvenlik", icon: <Check size={17} /> },
-  { id: "library", label: "Medya Kütüphanesi", icon: <FolderPlus size={17} /> },
-  { id: "gallery", label: "Galeri", icon: <Image size={17} /> },
-  { id: "audio", label: "Ses Çıkışı", icon: <Volume2 size={17} /> },
+const settingsTabs: Array<{ id: SettingsTabId; labelKey: string; icon: ReactNode }> = [
+  { id: "web", labelKey: "settings.tabs.web", icon: <Globe2 size={17} /> },
+  { id: "playback", labelKey: "settings.tabs.playback", icon: <Play size={17} /> },
+  { id: "keyboard", labelKey: "settings.tabs.keyboard", icon: <Grid2X2 size={17} /> },
+  { id: "behavior", labelKey: "settings.tabs.behavior", icon: <SlidersHorizontal size={17} /> },
+  { id: "security", labelKey: "settings.tabs.security", icon: <Check size={17} /> },
 ];
+
+const appLanguages: Array<{
+  id: AppLanguage;
+  name: string;
+  nativeName: string;
+  flag: string;
+  emoji: string;
+}> = [
+  { id: "tr-TR", name: "Türkçe", nativeName: "Türkçe", flag: "tr.svg", emoji: "🇹🇷" },
+  { id: "en-US", name: "English", nativeName: "English", flag: "us.svg", emoji: "🇺🇸" },
+  { id: "ar-SA", name: "العربية", nativeName: "العربية", flag: "sa.svg", emoji: "🇸🇦" },
+  { id: "es-ES", name: "Español", nativeName: "Español", flag: "es.svg", emoji: "🇪🇸" },
+];
+
+const appThemes: Array<{ id: AppTheme; labelKey: string }> = [
+  { id: "aur-renk-efektleri", labelKey: "settings.theme.aur" },
+  { id: "performance-balanced", labelKey: "settings.theme.performanceBalanced" },
+  { id: "performance-lite", labelKey: "settings.theme.performanceLite" },
+  { id: "ardali", labelKey: "settings.theme.ardali" },
+  { id: "dark", labelKey: "settings.theme.dark" },
+  { id: "black", labelKey: "settings.theme.black" },
+  { id: "light", labelKey: "settings.theme.light" },
+  { id: "frappe", labelKey: "settings.theme.frappe" },
+  { id: "onedark", labelKey: "settings.theme.onedark" },
+  { id: "matrix", labelKey: "settings.theme.matrix" },
+  { id: "latte", labelKey: "settings.theme.latte" },
+  { id: "solarized-dark", labelKey: "settings.theme.solarizedDark" },
+  { id: "neon-night", labelKey: "settings.theme.neonNight" },
+  { id: "retro-amber", labelKey: "settings.theme.retroAmber" },
+  { id: "deep-ocean", labelKey: "settings.theme.deepOcean" },
+  { id: "forest-mint", labelKey: "settings.theme.forestMint" },
+];
+
+const startupPages: Array<{ id: StartupPage; labelKey: string }> = [
+  { id: "music", labelKey: "settings.behavior.startupPageMusic" },
+  { id: "video", labelKey: "settings.behavior.startupPageVideo" },
+  { id: "gallery", labelKey: "settings.behavior.startupPageGallery" },
+  { id: "web", labelKey: "settings.behavior.startupPageWeb" },
+];
+
+const keyboardShortcutGroups: Array<{
+  titleKey: string;
+  items: Array<{ labelKey: string; keys: string[]; icon: ReactNode }>;
+}> = [
+  {
+    titleKey: "settings.keyboard.media",
+    items: [
+      { labelKey: "settings.keyboard.playPause", keys: ["Space", "Media Play/Pause"], icon: <Play size={16} /> },
+      { labelKey: "settings.keyboard.previous", keys: ["Ctrl + Left", "Media Previous"], icon: <SkipBack size={16} /> },
+      { labelKey: "settings.keyboard.next", keys: ["Ctrl + Right", "Media Next"], icon: <SkipForward size={16} /> },
+      { labelKey: "settings.keyboard.mute", keys: ["M"], icon: <VolumeX size={16} /> },
+      { labelKey: "settings.keyboard.seekBack", keys: ["Left"], icon: <Rewind size={16} /> },
+      { labelKey: "settings.keyboard.seekForward", keys: ["Right"], icon: <SkipForward size={16} /> },
+    ],
+  },
+  {
+    titleKey: "settings.keyboard.sections",
+    items: [
+      { labelKey: "settings.keyboard.music", keys: ["1"], icon: <Music2 size={16} /> },
+      { labelKey: "settings.keyboard.video", keys: ["2"], icon: <Video size={16} /> },
+      { labelKey: "settings.keyboard.gallery", keys: ["3"], icon: <Image size={16} /> },
+      { labelKey: "settings.keyboard.web", keys: ["4"], icon: <Globe2 size={16} /> },
+      { labelKey: "settings.keyboard.settings", keys: ["Ctrl + ,"], icon: <Settings size={16} /> },
+    ],
+  },
+  {
+    titleKey: "settings.keyboard.tools",
+    items: [
+      { labelKey: "settings.keyboard.soundEffects", keys: ["E"], icon: <SlidersHorizontal size={16} /> },
+      { labelKey: "settings.keyboard.visualizer", keys: ["V"], icon: <Sparkles size={16} /> },
+      { labelKey: "settings.keyboard.fullscreen", keys: ["F"], icon: <Maximize2 size={16} /> },
+    ],
+  },
+];
+
+function getSystemTheme(): AppTheme {
+  if (typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: light)").matches) return "light";
+  return "black";
+}
+
+function resolveEffectiveTheme(settings: Pick<WebSettings, "theme" | "followSystemTheme">): AppTheme {
+  return settings.followSystemTheme ? getSystemTheme() : settings.theme;
+}
+
+function applyDocumentTheme(theme: AppTheme, options: { persist?: boolean } = {}) {
+  document.documentElement.dataset.ardaliTheme = theme;
+  document.documentElement.setAttribute("theme", theme);
+  document.body?.setAttribute("data-ardali-theme", theme);
+  if (options.persist === false) return;
+  try {
+    localStorage.setItem("ardali_ui_theme", theme);
+    localStorage.setItem("theme", theme);
+  } catch {
+    // storage disabled
+  }
+}
+
+function shouldIgnoreKeyboardShortcut(event: KeyboardEvent) {
+  if (event.defaultPrevented) return true;
+  const target = event.target as HTMLElement | null;
+  if (!target) return false;
+  const tagName = target.tagName.toLowerCase();
+  return target.isContentEditable || tagName === "input" || tagName === "textarea" || tagName === "select";
+}
+
+const shortcutKeyTranslations: Record<AppLanguage, Record<string, string>> = {
+  "tr-TR": {
+    Space: "Boşluk",
+    Left: "Sol",
+    Right: "Sağ",
+    "Ctrl + Left": "Ctrl + Sol",
+    "Ctrl + Right": "Ctrl + Sağ",
+    "Ctrl + ,": "Ctrl + ,",
+    "Media Play/Pause": "Medya Oynat/Duraklat",
+    "Media Previous": "Medya Önceki",
+    "Media Next": "Medya Sonraki",
+  },
+  "en-US": {
+    Space: "Space",
+    Left: "Left",
+    Right: "Right",
+    "Ctrl + Left": "Ctrl + Left",
+    "Ctrl + Right": "Ctrl + Right",
+    "Ctrl + ,": "Ctrl + ,",
+    "Media Play/Pause": "Media Play/Pause",
+    "Media Previous": "Media Previous",
+    "Media Next": "Media Next",
+  },
+  "ar-SA": {
+    Space: "مسافة",
+    Left: "يسار",
+    Right: "يمين",
+    "Ctrl + Left": "Ctrl + يسار",
+    "Ctrl + Right": "Ctrl + يمين",
+    "Ctrl + ,": "Ctrl + ,",
+    "Media Play/Pause": "تشغيل/إيقاف الوسائط",
+    "Media Previous": "الوسائط السابق",
+    "Media Next": "الوسائط التالي",
+  },
+  "es-ES": {
+    Space: "Espacio",
+    Left: "Izquierda",
+    Right: "Derecha",
+    "Ctrl + Left": "Ctrl + Izquierda",
+    "Ctrl + Right": "Ctrl + Derecha",
+    "Ctrl + ,": "Ctrl + ,",
+    "Media Play/Pause": "Medio reproducir/pausar",
+    "Media Previous": "Medio anterior",
+    "Media Next": "Medio siguiente",
+  },
+};
+
+function shortcutKeyLabel(language: AppLanguage, keyLabel: string) {
+  return shortcutKeyTranslations[language]?.[keyLabel] ?? keyLabel;
+}
+
+const i18n: Record<AppLanguage, Record<string, string>> = {
+  "tr-TR": {
+    "app.title": "ArDali WebMedya",
+    "common.cancel": "İptal",
+    "common.close": "Kapat",
+    "common.save": "Kaydet",
+    "common.resetDefaults": "Varsayılana döndür",
+    "common.yes": "Evet",
+    "common.no": "Hayır",
+    "window.minimize": "Küçült",
+    "window.maximize": "Büyüt",
+    "rail.video": "Videolar",
+    "rail.music": "Müzik",
+    "rail.gallery": "Galeri",
+    "rail.web": "Web",
+    "rail.listen": "Dinleyerek bul",
+    "rail.downloads": "İndirme",
+    "rail.soundEffects": "Ses Efektleri",
+    "rail.visualizer": "Görselleştirme",
+    "rail.settings": "Ayarlar",
+    "rail.about": "Hakkında",
+    "settings.title": "Tercihler",
+    "settings.aria": "Ayar bölümleri",
+    "settings.tabs.web": "Web Ayarları",
+    "settings.tabs.playback": "Oynat",
+    "settings.tabs.keyboard": "Klavye Kısayolları",
+    "settings.tabs.listen": "Dinle",
+    "settings.tabs.behavior": "Davranış",
+    "settings.tabs.security": "Güvenlik",
+    "settings.tabs.library": "Medya Kütüphanesi",
+    "settings.tabs.gallery": "Galeri",
+    "settings.tabs.audio": "Ses Çıkışı",
+    "settings.theme.aur": "ArDali Medya Player",
+    "settings.theme.performanceBalanced": "Dengeli Akış",
+    "settings.theme.performanceLite": "Düşük Donanım Kararlı",
+    "settings.theme.ardali": "ArDali",
+    "settings.theme.dark": "Karanlık",
+    "settings.theme.black": "Siyah",
+    "settings.theme.light": "Aydınlık",
+    "settings.theme.frappe": "Frappé",
+    "settings.theme.onedark": "One Dark",
+    "settings.theme.matrix": "Matrix",
+    "settings.theme.latte": "Latte",
+    "settings.theme.solarizedDark": "Solarized Dark",
+    "settings.theme.neonNight": "Neon Night",
+    "settings.theme.retroAmber": "Retro Amber",
+    "settings.theme.deepOcean": "Derin Okyanus",
+    "settings.theme.forestMint": "Orman Nanesi",
+    "settings.keyboard.media": "Medya Kısayolları",
+    "settings.keyboard.sections": "Ana Bölümler",
+    "settings.keyboard.tools": "Araçlar",
+    "settings.keyboard.playPause": "Oynat / Duraklat",
+    "settings.keyboard.previous": "Önceki parça",
+    "settings.keyboard.next": "Sonraki parça",
+    "settings.keyboard.mute": "Sesi kapat / aç",
+    "settings.keyboard.seekBack": "5 saniye geri",
+    "settings.keyboard.seekForward": "5 saniye ileri",
+    "settings.keyboard.music": "Müzik",
+    "settings.keyboard.video": "Video",
+    "settings.keyboard.gallery": "Galeri",
+    "settings.keyboard.web": "Web",
+    "settings.keyboard.settings": "Ayarlar",
+    "settings.keyboard.soundEffects": "Ses Efektleri",
+    "settings.keyboard.visualizer": "Görselleştirici",
+    "settings.keyboard.fullscreen": "Tam ekran",
+    "settings.playback.startupSection": "Başlangıç",
+    "settings.playback.restoreLastTrack": "Açılışta son parçayı geri yükle",
+    "settings.playback.restoreLastTrackHint": "Uygulama açıldığında en son seçili parçayı hazırlar.",
+    "settings.playback.autoplayLastTrack": "Açılışta son parçayı otomatik başlat",
+    "settings.playback.autoplayLastTrackHint": "Son parça geri yüklendikten sonra oynatmayı başlatır.",
+    "settings.playback.resumePosition": "Son parçayı kaldığı pozisyondan devam ettir",
+    "settings.playback.resumePositionHint": "Parçayı baştan değil, kaydedilen zamandan başlatır.",
+    "settings.playback.transitionsSection": "Geçişler",
+    "settings.playback.fadeOnPause": "Duraklatırken yumuşak geç",
+    "settings.playback.fadeOnPauseHint": "Duraklatmada sesi kısa bir fade ile indirir.",
+    "settings.playback.fadeOnStop": "Durdururken yumuşak geç",
+    "settings.playback.fadeOnStopHint": "Durdurma davranışlarında ani kesilmeyi azaltır.",
+    "settings.playback.fadeDuration": "Fade süresi",
+    "settings.playback.fadeDurationHint": "Duraklatma/durdurma fade süresi.",
+    "settings.playback.crossfadeManual": "Parça değiştirirken çapraz geçiş yap",
+    "settings.playback.crossfadeManualHint": "Önceki/sonraki parça geçişlerinde sesi bindirerek yumuşatır.",
+    "settings.playback.crossfadeAuto": "Parça bitmeden otomatik çapraz geçiş yap",
+    "settings.playback.crossfadeAutoHint": "Parçanın sonuna yaklaşınca sıradaki parçaya yumuşak geçer.",
+    "settings.playback.crossfadeDuration": "Çapraz geçiş süresi",
+    "settings.playback.crossfadeDurationHint": "Otomatik ve elle geçişlerde kullanılan süre.",
+    "settings.behavior.languageSection": "Dil Seçimi",
+    "settings.behavior.languageLabel": "Dil",
+    "settings.behavior.languageHint": "Dil değişikliği kaydedildikten sonra yeniden başlatma gerekir.",
+    "settings.behavior.appearanceSection": "Görünüm",
+    "settings.behavior.themeLabel": "Tema",
+    "settings.behavior.themeHint": "Uygulama renklerini anında değiştirir.",
+    "settings.behavior.followSystemTheme": "Sistem temasını takip et",
+    "settings.behavior.followSystemThemeHint": "Açıkken tema sistemin açık/koyu tercihine göre uygulanır.",
+    "settings.behavior.startupSection": "Başlangıç Davranışı",
+    "settings.behavior.rememberLastSection": "Son açık ana bölümü hatırla",
+    "settings.behavior.rememberLastSectionHint": "Uygulama açıldığında kaldığın ana sekmeye döner.",
+    "settings.behavior.startupPageLabel": "Varsayılan açılış bölümü",
+    "settings.behavior.startupPageHint": "Son bölüm hatırlama kapalıysa uygulama bu bölümle açılır.",
+    "settings.behavior.startupPageMusic": "Medya (Ses)",
+    "settings.behavior.startupPageVideo": "Video",
+    "settings.behavior.startupPageGallery": "Galeri",
+    "settings.behavior.startupPageWeb": "Web",
+    "settings.behavior.startupPageListen": "Dinle",
+    "settings.behavior.restartTitle": "Yeniden başlatma gerekli",
+    "settings.behavior.restartMessage": "Dil değişikliğinin uygulanması için uygulamanın yeniden başlatılması gerekiyor. Şimdi yeniden başlatılsın mı?",
+    "settings.web.general": "Genel",
+    "settings.web.enable": "Web deneyimini etkinleştir",
+    "settings.web.defaultPlatform": "Varsayılan platform",
+    "settings.web.defaultPlatformHint": "Web sekmesi ilk açıldığında seçilecek platform",
+    "settings.web.rememberPlatform": "Son kullanılan web platformunu hatırla",
+    "settings.web.restoreSession": "Uygulama web sekmesinde kapandıysa aynı platformla aç",
+    "settings.web.suspendInactive": "Web sekmesi pasifken web oturumunu kapat",
+    "settings.web.startupDelay": "Web başlangıç yükleme gecikmesi",
+    "settings.web.startupDelayHint": "Yavaş sistemlerde ilk WebView açılışını geciktirir",
+    "settings.web.delayInstant": "Anında (0 sn)",
+    "settings.web.delayShort": "Kısa (0.35 sn)",
+    "settings.web.delayBalanced": "Dengeli (0.7 sn)",
+    "settings.web.delaySlow": "Yavaş sistem (1.2 sn)",
+    "settings.web.appearance": "Görünüm ve Hareket",
+    "settings.web.animation": "Web arayüz animasyonu",
+    "settings.web.animationHint": "Üst ve yan barın web içeriğiyle davranış biçimi",
+    "settings.web.animationCompact": "Kompakt",
+    "settings.web.animationDock": "Dock tarzı",
+    "settings.web.motion": "Web animasyon hızı",
+    "settings.web.motionHint": "Bar gizleme/açılma hareketinin temposu",
+    "settings.web.motionCalm": "Sakin",
+    "settings.web.motionBalanced": "Dengeli",
+    "settings.web.motionFast": "Hızlı",
+    "settings.web.autoHide": "İzleme sırasında üst ve yan barı otomatik gizle",
+    "settings.web.lowPower": "Web animasyonları düşük sistem modu",
+    "settings.web.autoHideDelay": "Otomatik gizleme süresi",
+    "settings.web.autoHideDelayHint": "Fare hareketi durduktan sonra bekleme süresi",
+    "settings.web.autoRecover": "Açılışta boş kalan web ekranını otomatik yeniden yükle",
+    "settings.web.privacy": "Gizlilik ve Veri",
+    "settings.web.privacyInfo": "Kalıcı oturum açıkken web girişleri yerel profil klasöründe saklanır. Bu klasör yalnızca mevcut Linux kullanıcısına açık olacak şekilde korunur.",
+    "settings.web.persistent": "Kalıcı oturumları koru",
+    "settings.web.private": "Gizli web modu",
+    "settings.web.clearCacheOnQuit": "Uygulama kapanırken web önbelleğini temizle",
+    "settings.web.clearCookiesOnQuit": "Uygulama kapanırken web çerezlerini temizle",
+    "settings.web.clearSiteDataOnQuit": "Uygulama kapanırken site verilerini temizle",
+    "settings.web.preferHttps": "HTTP adreslerini mümkünse HTTPS olarak aç",
+    "settings.web.reduceWebRtc": "WebRTC IP sızıntılarını azalt",
+    "settings.web.stripTracking": "Bilinen takip parametrelerini temizle",
+    "settings.web.blockThirdParty": "Üçüncü taraf çerezleri engelle",
+    "settings.web.clearCache": "Önbelleği temizle",
+    "settings.web.clearCookies": "Çerezleri temizle",
+    "settings.web.clearSiteData": "Site verilerini temizle",
+    "settings.web.clearAll": "Web oturumlarını temizle",
+    "settings.web.clearing": "{target} temizleniyor...",
+    "settings.web.cleared": "{target} temizlendi.",
+    "settings.web.clearFailed": "{target} temizlenemedi.",
+    "settings.web.permissions": "İzinler ve Politika",
+    "settings.web.userAgent": "Kullanıcı aracısı",
+    "settings.web.userAgentHint": "Platformlara bildirilecek web görünümü tipi",
+    "settings.web.uaDesktop": "Masaüstü",
+    "settings.web.uaMobile": "Mobil",
+    "settings.web.uaDefault": "Varsayılan",
+    "settings.web.autoplay": "Otomatik oynatma",
+    "settings.web.autoplayHint": "Web sitelerinin medya başlatma davranışı",
+    "settings.web.autoplayAllow": "İzin ver",
+    "settings.web.autoplayGesture": "Kullanıcı etkileşimi iste",
+    "settings.web.autoplayBlock": "Engelle",
+    "settings.web.allowCamera": "Kamera iznine izin ver",
+    "settings.web.allowMicrophone": "Mikrofon iznine izin ver",
+    "settings.web.allowLocation": "Konum iznine izin ver",
+    "settings.web.allowNotifications": "Bildirim iznine izin ver",
+    "settings.web.allowPopups": "Pop-up pencerelerine izin ver",
+    "library.title": "KÜTÜPHANE",
+    "library.collapseOpen": "Sekmeler şeridini aç",
+    "library.collapseHide": "Sekmeler şeridini gizle",
+    "library.openVideo": "Video Aç",
+    "library.addMusic": "Kütüphaneye ekle",
+    "library.videoReady": "{count} video hazır",
+    "library.musicReady": "{count} şarkı hazır",
+    "library.pickVideo": "Yerel video dosyası seç",
+    "library.root": "Kök kütüphane",
+    "library.collection": "Koleksiyon",
+    "library.nowPlaying": "Şimdi çalan",
+    "library.queue": "Kuyruk",
+    "library.search": "Kütüphanede ara...",
+    "library.savedFolders": "KAYITLI KLASÖRLER",
+    "library.localVideo": "Yerel Video",
+    "library.localMusic": "Yerel Müzik",
+    "library.shown": "Gösterilen: {count}",
+    "library.cleanMissing": "Eksik dosyaları temizle",
+    "nav.back": "Geri",
+    "nav.forward": "İleri",
+    "nav.refresh": "Yenile",
+    "nav.viewSettings": "Görünüm ayarları",
+    "nav.musicViewSettings": "Müzik görünüm ayarları",
+    "nav.list": "Liste",
+    "nav.compact": "Kompakt",
+    "nav.comfortable": "Rahat",
+    "nav.card": "Kart",
+    "nav.nowPlaying": "Şu An Çalınan: {name}",
+    "music.emptyTitle": "Müzik kütüphanesi boş",
+    "music.emptyHint": "MP3, FLAC, WAV, OGG, M4A veya OPUS dosyalarını ekleyin.",
+    "music.noResultsTitle": "Sonuç bulunamadı",
+    "music.noResultsHint": "Arama filtresini değiştirerek kütüphanede tekrar deneyin.",
+    "music.playing": "Çalınıyor",
+    "video.emptyTitle": "Video kütüphanesi boş",
+    "video.emptyHint": "MP4, MKV, WebM, MOV veya AVI dosyalarını ekleyin.",
+    "video.noResultsHint": "Arama filtresini değiştirerek video kütüphanesinde tekrar deneyin.",
+    "video.back": "Geri",
+    "video.fullscreen": "Tam Ekran",
+    "video.play": "Videoyu oynat",
+    "video.miniPlayer": "Mini oynatıcı",
+    "video.restore": "Çalışma alanına al",
+    "video.closeMini": "Mini oynatıcıyı kapat",
+    "video.position": "Video konumu",
+    "video.quality": "Kalite",
+    "video.auto": "Otomatik",
+    "video.stableVolume": "Sabit ses",
+    "video.volumeBoost": "Ses artırma",
+    "video.cinematicLight": "Sinematik ışıklandırma",
+    "video.captions": "Ek Açıklamalar",
+    "video.subtitles": "Altyazılar (1)",
+    "video.sleepTimer": "Uyku modu zamanlayıcı",
+    "video.closed": "Kapalı",
+    "video.open": "Açık",
+    "video.speed": "Çalma hızı",
+    "video.normal": "Normal",
+    "player.position": "Oynatma konumu",
+    "player.clear": "Temizle",
+    "player.shuffle": "Karıştır",
+    "player.previous": "Önceki",
+    "player.rewind10": "10sn Geri",
+    "player.playPause": "Oynat / Duraklat",
+    "player.forward10": "10sn İleri",
+    "player.next": "Sonraki",
+    "player.repeat": "Tekrarla",
+    "player.repeatOne": "Çalan şarkıyı tekrarla",
+    "player.unmute": "Sesi aç",
+    "player.mute": "Sessiz",
+    "player.volume": "Ses seviyesi",
+    "common.removeFromLibrary": "Kütüphaneden kaldır",
+    "sfx.windowTitle": "Ses Efektleri ({scope}) - ArDali",
+    "sfx.scope.music": "Müzik",
+    "sfx.scope.video": "Video",
+    "sfx.scope.web": "Web",
+    "sfx.enableEffects": "Ses Efektlerini Etkinleştir",
+    "sfx.lightColor": "Işık Rengi",
+    "sfx.light.cyan": "Gök Mavi",
+    "sfx.light.rainbow": "Gökkuşağı",
+    "sfx.light.blue": "Mavi",
+    "sfx.light.purple": "Mor",
+    "sfx.light.green": "Yeşil",
+    "sfx.light.amber": "Amber",
+    "sfx.light.red": "Kırmızı",
+    "sfx.light.off": "Kapalı",
+    "sfx.status": "DSP: {state} • Kapsam: {scope} • Aktif: {active}",
+    "sfx.on": "Açık",
+    "sfx.off": "Kapalı",
+    "sfx.enabled": "Etkin",
+    "sfx.presets": "Hazır Ayarlar",
+    "sfx.reset": "Sıfırla",
+    "sfx.module": "ArDali Modülü",
+    "sfx.resetModule": "Modülü Sıfırla",
+    "sfx.balance": "Denge (Sol ↔ Sağ)",
+    "sfx.center": "Merkez",
+    "sfx.resize": "Pencereyi yeniden boyutlandır",
+    "sfx.stereoField": "Stereo Alan Simülasyonu",
+    "sfx.dspStatus": "DSP Durumu: {state} | Loaded: {loaded}",
+    "sfx.connected": "Bağlı",
+    "sfx.waiting": "Bekliyor",
+    "sfx.headphonesDetected": "{device} kulaklık olarak algılandı. Crossfeed kullanımı uygundur.",
+    "sfx.speakersDetected": "{device} hoparlör/line çıkışı olarak algılandı. Crossfeed genelde gerekli değildir.",
+    "sfx.outputUnknown": "Çıkış bilgisi okunamadı. Crossfeed manuel modda kalır.",
+    "sfx.crossfeedAuto": "Kulaklık bağlantısına göre crossfeed'i otomatik aç/kapat",
+    "sfx.lowHighCut": "Low Cut {low} Hz • High Cut {high} Hz",
+    "sfx.truePeakMeters": "Stereo True Peak Ölçerleri",
+    "sfx.clipping": "Clipping:",
+    "sfx.oversampling": "Oversampling:",
+    "sfx.stereoLink": "Stereo Link",
+    "sfx.truePeakActive": "Limiter aktif: Clipping {clip}, anlık GR {gr} dB.",
+    "sfx.truePeakIdle": "Limiter kapalı: meter ve clipping sayacı beklemede.",
+    "sfx.slope": "Eğim",
+    "sfx.bassMonoNote": "Cutoff altındaki frekanslar mono merkeze toplanır; üst bant stereo genişliğini korur veya Stereo Width ile genişler.",
+    "eqPresets.title": "Hazır Ayarlar",
+    "eqPresets.windowTitle": "ArDali Hazır Ayarlar - ArDali Medya Player",
+    "eqPresets.search": "Hazır ayar ara...",
+    "eqPresets.viewMode": "Görünüm modu",
+    "eqPresets.quality": "Tam",
+    "eqPresets.balanced": "Dengeli",
+    "eqPresets.performance": "Minimum",
+    "eqPresets.category": "Kategori",
+    "eqPresets.shown": "Gösterilen: {visible} / {total} • Grup: {group}",
+    "eqPresets.loadError": "Hazır ayarlar yüklenemedi",
+    "eqPresets.hintQuality": "Tam mod: tüm animasyon ve görsel efektler aktif.",
+    "eqPresets.hintBalanced": "Dengeli mod: animasyonlar sadeleşir, performans daha stabildir.",
+    "eqPresets.hintPerformance": "Minimum mod: en hafif görünüm, animasyon ve efektler minimumdadır.",
+  },
+  "en-US": {
+    "app.title": "ArDali WebMedia",
+    "common.cancel": "Cancel",
+    "common.close": "Close",
+    "common.save": "Save",
+    "common.resetDefaults": "Reset to defaults",
+    "common.yes": "Yes",
+    "common.no": "No",
+    "window.minimize": "Minimize",
+    "window.maximize": "Maximize",
+    "rail.video": "Videos",
+    "rail.music": "Music",
+    "rail.gallery": "Gallery",
+    "rail.web": "Web",
+    "rail.listen": "Listen",
+    "rail.downloads": "Downloads",
+    "rail.soundEffects": "Sound Effects",
+    "rail.visualizer": "Visualizer",
+    "rail.settings": "Settings",
+    "rail.about": "About",
+    "settings.title": "Preferences",
+    "settings.aria": "Settings sections",
+    "settings.tabs.web": "Web Settings",
+    "settings.tabs.playback": "Playback",
+    "settings.tabs.keyboard": "Keyboard Shortcuts",
+    "settings.tabs.listen": "Listen",
+    "settings.tabs.behavior": "Behavior",
+    "settings.tabs.security": "Security",
+    "settings.tabs.library": "Media Library",
+    "settings.tabs.gallery": "Gallery",
+    "settings.tabs.audio": "Audio Output",
+    "settings.theme.aur": "ArDali Media Player",
+    "settings.theme.performanceBalanced": "Balanced Flow",
+    "settings.theme.performanceLite": "Low Hardware Stable",
+    "settings.theme.ardali": "ArDali",
+    "settings.theme.dark": "Dark",
+    "settings.theme.black": "Black",
+    "settings.theme.light": "Light",
+    "settings.theme.frappe": "Frappé",
+    "settings.theme.onedark": "One Dark",
+    "settings.theme.matrix": "Matrix",
+    "settings.theme.latte": "Latte",
+    "settings.theme.solarizedDark": "Solarized Dark",
+    "settings.theme.neonNight": "Neon Night",
+    "settings.theme.retroAmber": "Retro Amber",
+    "settings.theme.deepOcean": "Deep Ocean",
+    "settings.theme.forestMint": "Forest Mint",
+    "settings.keyboard.media": "Media Shortcuts",
+    "settings.keyboard.sections": "Main Sections",
+    "settings.keyboard.tools": "Tools",
+    "settings.keyboard.playPause": "Play / Pause",
+    "settings.keyboard.previous": "Previous track",
+    "settings.keyboard.next": "Next track",
+    "settings.keyboard.mute": "Mute / unmute",
+    "settings.keyboard.seekBack": "Back 5 seconds",
+    "settings.keyboard.seekForward": "Forward 5 seconds",
+    "settings.keyboard.music": "Music",
+    "settings.keyboard.video": "Video",
+    "settings.keyboard.gallery": "Gallery",
+    "settings.keyboard.web": "Web",
+    "settings.keyboard.settings": "Settings",
+    "settings.keyboard.soundEffects": "Sound Effects",
+    "settings.keyboard.visualizer": "Visualizer",
+    "settings.keyboard.fullscreen": "Fullscreen",
+    "settings.playback.startupSection": "Startup",
+    "settings.playback.restoreLastTrack": "Restore last track on startup",
+    "settings.playback.restoreLastTrackHint": "Prepares the last selected track when the app opens.",
+    "settings.playback.autoplayLastTrack": "Autoplay the last track on startup",
+    "settings.playback.autoplayLastTrackHint": "Starts playback after restoring the last track.",
+    "settings.playback.resumePosition": "Resume the last track from its saved position",
+    "settings.playback.resumePositionHint": "Starts from the saved time instead of the beginning.",
+    "settings.playback.transitionsSection": "Transitions",
+    "settings.playback.fadeOnPause": "Fade when pausing",
+    "settings.playback.fadeOnPauseHint": "Lowers the sound with a short fade before pausing.",
+    "settings.playback.fadeOnStop": "Fade when stopping",
+    "settings.playback.fadeOnStopHint": "Reduces abrupt cuts during stop actions.",
+    "settings.playback.fadeDuration": "Fade duration",
+    "settings.playback.fadeDurationHint": "Duration for pause/stop fades.",
+    "settings.playback.crossfadeManual": "Crossfade when changing tracks",
+    "settings.playback.crossfadeManualHint": "Smooths previous/next track changes.",
+    "settings.playback.crossfadeAuto": "Auto-crossfade before a track ends",
+    "settings.playback.crossfadeAutoHint": "Moves to the next track smoothly near the end.",
+    "settings.playback.crossfadeDuration": "Crossfade duration",
+    "settings.playback.crossfadeDurationHint": "Duration used for manual and automatic transitions.",
+    "settings.behavior.languageSection": "Language Selection",
+    "settings.behavior.languageLabel": "Language",
+    "settings.behavior.languageHint": "Changing the language requires restarting after saving.",
+    "settings.behavior.appearanceSection": "Appearance",
+    "settings.behavior.themeLabel": "Theme",
+    "settings.behavior.themeHint": "Changes the application colors instantly.",
+    "settings.behavior.followSystemTheme": "Follow system theme",
+    "settings.behavior.followSystemThemeHint": "When enabled, the app follows the system light/dark preference.",
+    "settings.behavior.startupSection": "Startup Behavior",
+    "settings.behavior.rememberLastSection": "Remember last main section",
+    "settings.behavior.rememberLastSectionHint": "The app opens on the main section you last used.",
+    "settings.behavior.startupPageLabel": "Default startup section",
+    "settings.behavior.startupPageHint": "Used when remembering the last section is disabled.",
+    "settings.behavior.startupPageMusic": "Media (Audio)",
+    "settings.behavior.startupPageVideo": "Video",
+    "settings.behavior.startupPageGallery": "Gallery",
+    "settings.behavior.startupPageWeb": "Web",
+    "settings.behavior.startupPageListen": "Listen",
+    "settings.behavior.restartTitle": "Restart required",
+    "settings.behavior.restartMessage": "The app must restart to apply the language change. Restart now?",
+    "settings.web.general": "General",
+    "settings.web.enable": "Enable web experience",
+    "settings.web.defaultPlatform": "Default platform",
+    "settings.web.defaultPlatformHint": "The platform selected when the Web tab first opens",
+    "settings.web.rememberPlatform": "Remember the last used web platform",
+    "settings.web.restoreSession": "Restore the same platform if the app closed on the Web tab",
+    "settings.web.suspendInactive": "Close the web session while the Web tab is inactive",
+    "settings.web.startupDelay": "Web startup loading delay",
+    "settings.web.startupDelayHint": "Delays the first WebView startup on slower systems",
+    "settings.web.delayInstant": "Instant (0 s)",
+    "settings.web.delayShort": "Short (0.35 s)",
+    "settings.web.delayBalanced": "Balanced (0.7 s)",
+    "settings.web.delaySlow": "Slow system (1.2 s)",
+    "settings.web.appearance": "Appearance and Motion",
+    "settings.web.animation": "Web interface animation",
+    "settings.web.animationHint": "How the top and side bars behave with web content",
+    "settings.web.animationCompact": "Compact",
+    "settings.web.animationDock": "Dock style",
+    "settings.web.motion": "Web animation speed",
+    "settings.web.motionHint": "The tempo of hiding/showing the bars",
+    "settings.web.motionCalm": "Calm",
+    "settings.web.motionBalanced": "Balanced",
+    "settings.web.motionFast": "Fast",
+    "settings.web.autoHide": "Auto-hide top and side bars while watching",
+    "settings.web.lowPower": "Low system mode for web animations",
+    "settings.web.autoHideDelay": "Auto-hide delay",
+    "settings.web.autoHideDelayHint": "Delay after mouse movement stops",
+    "settings.web.autoRecover": "Automatically reload blank web screens on startup",
+    "settings.web.privacy": "Privacy and Data",
+    "settings.web.privacyInfo": "When persistent sessions are enabled, web logins are stored in the local profile folder. This folder is protected for the current Linux user.",
+    "settings.web.persistent": "Keep persistent sessions",
+    "settings.web.private": "Private web mode",
+    "settings.web.clearCacheOnQuit": "Clear web cache when the app quits",
+    "settings.web.clearCookiesOnQuit": "Clear web cookies when the app quits",
+    "settings.web.clearSiteDataOnQuit": "Clear site data when the app quits",
+    "settings.web.preferHttps": "Open HTTP addresses as HTTPS when possible",
+    "settings.web.reduceWebRtc": "Reduce WebRTC IP leaks",
+    "settings.web.stripTracking": "Remove known tracking parameters",
+    "settings.web.blockThirdParty": "Block third-party cookies",
+    "settings.web.clearCache": "Clear cache",
+    "settings.web.clearCookies": "Clear cookies",
+    "settings.web.clearSiteData": "Clear site data",
+    "settings.web.clearAll": "Clear web sessions",
+    "settings.web.clearing": "Clearing {target}...",
+    "settings.web.cleared": "{target} cleared.",
+    "settings.web.clearFailed": "Could not clear {target}.",
+    "settings.web.permissions": "Permissions and Policy",
+    "settings.web.userAgent": "User agent",
+    "settings.web.userAgentHint": "The web view type reported to platforms",
+    "settings.web.uaDesktop": "Desktop",
+    "settings.web.uaMobile": "Mobile",
+    "settings.web.uaDefault": "Default",
+    "settings.web.autoplay": "Autoplay",
+    "settings.web.autoplayHint": "How websites can start media",
+    "settings.web.autoplayAllow": "Allow",
+    "settings.web.autoplayGesture": "Require user interaction",
+    "settings.web.autoplayBlock": "Block",
+    "settings.web.allowCamera": "Allow camera permission",
+    "settings.web.allowMicrophone": "Allow microphone permission",
+    "settings.web.allowLocation": "Allow location permission",
+    "settings.web.allowNotifications": "Allow notifications",
+    "settings.web.allowPopups": "Allow pop-up windows",
+    "library.title": "LIBRARY",
+    "library.collapseOpen": "Show tab rail",
+    "library.collapseHide": "Hide tab rail",
+    "library.openVideo": "Open Video",
+    "library.addMusic": "Add to library",
+    "library.videoReady": "{count} videos ready",
+    "library.musicReady": "{count} songs ready",
+    "library.pickVideo": "Select a local video file",
+    "library.root": "Root library",
+    "library.collection": "Collection",
+    "library.nowPlaying": "Now playing",
+    "library.queue": "Queue",
+    "library.search": "Search library...",
+    "library.savedFolders": "SAVED FOLDERS",
+    "library.localVideo": "Local Video",
+    "library.localMusic": "Local Music",
+    "library.shown": "Shown: {count}",
+    "library.cleanMissing": "Clean missing files",
+    "nav.back": "Back",
+    "nav.forward": "Forward",
+    "nav.refresh": "Refresh",
+    "nav.viewSettings": "View settings",
+    "nav.musicViewSettings": "Music view settings",
+    "nav.list": "List",
+    "nav.compact": "Compact",
+    "nav.comfortable": "Comfortable",
+    "nav.card": "Card",
+    "nav.nowPlaying": "Now Playing: {name}",
+    "music.emptyTitle": "Music library is empty",
+    "music.emptyHint": "Add MP3, FLAC, WAV, OGG, M4A or OPUS files.",
+    "music.noResultsTitle": "No results found",
+    "music.noResultsHint": "Change the search filter and try the library again.",
+    "music.playing": "Playing",
+    "video.emptyTitle": "Video library is empty",
+    "video.emptyHint": "Add MP4, MKV, WebM, MOV or AVI files.",
+    "video.noResultsHint": "Change the search filter and try the video library again.",
+    "video.back": "Back",
+    "video.fullscreen": "Fullscreen",
+    "video.play": "Play video",
+    "video.miniPlayer": "Mini player",
+    "video.restore": "Return to workspace",
+    "video.closeMini": "Close mini player",
+    "video.position": "Video position",
+    "video.quality": "Quality",
+    "video.auto": "Auto",
+    "video.stableVolume": "Stable volume",
+    "video.volumeBoost": "Volume boost",
+    "video.cinematicLight": "Cinematic lighting",
+    "video.captions": "Captions",
+    "video.subtitles": "Subtitles (1)",
+    "video.sleepTimer": "Sleep timer",
+    "video.closed": "Off",
+    "video.open": "On",
+    "video.speed": "Playback speed",
+    "video.normal": "Normal",
+    "player.position": "Playback position",
+    "player.clear": "Clear",
+    "player.shuffle": "Shuffle",
+    "player.previous": "Previous",
+    "player.rewind10": "10s back",
+    "player.playPause": "Play / Pause",
+    "player.forward10": "10s forward",
+    "player.next": "Next",
+    "player.repeat": "Repeat",
+    "player.repeatOne": "Repeat current song",
+    "player.unmute": "Unmute",
+    "player.mute": "Mute",
+    "player.volume": "Volume",
+    "common.removeFromLibrary": "Remove from library",
+    "sfx.windowTitle": "Sound Effects ({scope}) - ArDali",
+    "sfx.scope.music": "Music",
+    "sfx.scope.video": "Video",
+    "sfx.scope.web": "Web",
+    "sfx.enableEffects": "Enable Sound Effects",
+    "sfx.lightColor": "Light Color",
+    "sfx.light.cyan": "Sky Blue",
+    "sfx.light.rainbow": "Rainbow",
+    "sfx.light.blue": "Blue",
+    "sfx.light.purple": "Purple",
+    "sfx.light.green": "Green",
+    "sfx.light.amber": "Amber",
+    "sfx.light.red": "Red",
+    "sfx.light.off": "Off",
+    "sfx.status": "DSP: {state} • Scope: {scope} • Active: {active}",
+    "sfx.on": "On",
+    "sfx.off": "Off",
+    "sfx.enabled": "Enabled",
+    "sfx.presets": "Presets",
+    "sfx.reset": "Reset",
+    "sfx.module": "ArDali Module",
+    "sfx.resetModule": "Reset Module",
+    "sfx.balance": "Balance (Left ↔ Right)",
+    "sfx.center": "Center",
+    "sfx.resize": "Resize window",
+    "sfx.stereoField": "Stereo Field Simulation",
+    "sfx.dspStatus": "DSP Status: {state} | Loaded: {loaded}",
+    "sfx.connected": "Connected",
+    "sfx.waiting": "Waiting",
+    "sfx.headphonesDetected": "{device} detected as headphones. Crossfeed is suitable.",
+    "sfx.speakersDetected": "{device} detected as speaker/line output. Crossfeed is usually not required.",
+    "sfx.outputUnknown": "Output information could not be read. Crossfeed stays in manual mode.",
+    "sfx.crossfeedAuto": "Automatically toggle crossfeed for headphone connection",
+    "sfx.lowHighCut": "Low Cut {low} Hz • High Cut {high} Hz",
+    "sfx.truePeakMeters": "Stereo True Peak Meters",
+    "sfx.clipping": "Clipping:",
+    "sfx.oversampling": "Oversampling:",
+    "sfx.stereoLink": "Stereo Link",
+    "sfx.truePeakActive": "Limiter active: Clipping {clip}, current GR {gr} dB.",
+    "sfx.truePeakIdle": "Limiter off: meter and clipping counter are waiting.",
+    "sfx.slope": "Slope",
+    "sfx.bassMonoNote": "Frequencies below cutoff are summed to mono center; the upper band keeps or expands stereo width.",
+    "eqPresets.title": "Presets",
+    "eqPresets.windowTitle": "ArDali Presets - ArDali Media Player",
+    "eqPresets.search": "Search presets...",
+    "eqPresets.viewMode": "View mode",
+    "eqPresets.quality": "Full",
+    "eqPresets.balanced": "Balanced",
+    "eqPresets.performance": "Minimum",
+    "eqPresets.category": "Category",
+    "eqPresets.shown": "Shown: {visible} / {total} • Group: {group}",
+    "eqPresets.loadError": "Presets could not be loaded",
+    "eqPresets.hintQuality": "Full mode: all animation and visual effects are active.",
+    "eqPresets.hintBalanced": "Balanced mode: animations are simplified and performance is more stable.",
+    "eqPresets.hintPerformance": "Minimum mode: lightest view with minimal animation and effects.",
+  },
+  "ar-SA": {
+    "app.title": "ArDali WebMedia",
+    "common.cancel": "إلغاء",
+    "common.close": "إغلاق",
+    "common.save": "حفظ",
+    "common.resetDefaults": "إعادة الإعدادات الافتراضية",
+    "common.yes": "نعم",
+    "common.no": "لا",
+    "window.minimize": "تصغير",
+    "window.maximize": "تكبير",
+    "rail.video": "الفيديوهات",
+    "rail.music": "الموسيقى",
+    "rail.gallery": "المعرض",
+    "rail.web": "الويب",
+    "rail.listen": "الاستماع",
+    "rail.downloads": "التنزيلات",
+    "rail.soundEffects": "المؤثرات الصوتية",
+    "rail.visualizer": "المؤثرات المرئية",
+    "rail.settings": "الإعدادات",
+    "rail.about": "حول",
+    "settings.title": "التفضيلات",
+    "settings.aria": "أقسام الإعدادات",
+    "settings.tabs.web": "إعدادات الويب",
+    "settings.tabs.playback": "التشغيل",
+    "settings.tabs.keyboard": "اختصارات لوحة المفاتيح",
+    "settings.tabs.listen": "الاستماع",
+    "settings.tabs.behavior": "السلوك",
+    "settings.tabs.security": "الأمان",
+    "settings.tabs.library": "مكتبة الوسائط",
+    "settings.tabs.gallery": "المعرض",
+    "settings.tabs.audio": "مخرج الصوت",
+    "settings.theme.aur": "مشغل وسائط ArDali",
+    "settings.theme.performanceBalanced": "تدفق متوازن",
+    "settings.theme.performanceLite": "ثابت للأجهزة الضعيفة",
+    "settings.theme.ardali": "ArDali",
+    "settings.theme.dark": "داكن",
+    "settings.theme.black": "أسود",
+    "settings.theme.light": "فاتح",
+    "settings.theme.frappe": "فرابيه",
+    "settings.theme.onedark": "ون دارك",
+    "settings.theme.matrix": "ماتريكس",
+    "settings.theme.latte": "لاتيه",
+    "settings.theme.solarizedDark": "سولارايزد داكن",
+    "settings.theme.neonNight": "ليلة نيون",
+    "settings.theme.retroAmber": "عنبر قديم",
+    "settings.theme.deepOcean": "محيط عميق",
+    "settings.theme.forestMint": "نعناع الغابة",
+    "settings.keyboard.media": "اختصارات الوسائط",
+    "settings.keyboard.sections": "الأقسام الرئيسية",
+    "settings.keyboard.tools": "الأدوات",
+    "settings.keyboard.playPause": "تشغيل / إيقاف مؤقت",
+    "settings.keyboard.previous": "المقطع السابق",
+    "settings.keyboard.next": "المقطع التالي",
+    "settings.keyboard.mute": "كتم / تشغيل الصوت",
+    "settings.keyboard.seekBack": "رجوع 5 ثوان",
+    "settings.keyboard.seekForward": "تقدم 5 ثوان",
+    "settings.keyboard.music": "الموسيقى",
+    "settings.keyboard.video": "الفيديو",
+    "settings.keyboard.gallery": "المعرض",
+    "settings.keyboard.web": "الويب",
+    "settings.keyboard.settings": "الإعدادات",
+    "settings.keyboard.soundEffects": "المؤثرات الصوتية",
+    "settings.keyboard.visualizer": "المرئيات",
+    "settings.keyboard.fullscreen": "ملء الشاشة",
+    "settings.playback.startupSection": "بدء التشغيل",
+    "settings.playback.restoreLastTrack": "استعادة آخر مقطع عند البدء",
+    "settings.playback.restoreLastTrackHint": "يجهز آخر مقطع محدد عند فتح التطبيق.",
+    "settings.playback.autoplayLastTrack": "تشغيل آخر مقطع تلقائيا عند البدء",
+    "settings.playback.autoplayLastTrackHint": "يبدأ التشغيل بعد استعادة آخر مقطع.",
+    "settings.playback.resumePosition": "متابعة آخر مقطع من موضعه المحفوظ",
+    "settings.playback.resumePositionHint": "يبدأ من الوقت المحفوظ بدلا من البداية.",
+    "settings.playback.transitionsSection": "الانتقالات",
+    "settings.playback.fadeOnPause": "تلاشي الصوت عند الإيقاف المؤقت",
+    "settings.playback.fadeOnPauseHint": "يخفض الصوت بتلاشي قصير قبل الإيقاف المؤقت.",
+    "settings.playback.fadeOnStop": "تلاشي الصوت عند الإيقاف",
+    "settings.playback.fadeOnStopHint": "يقلل القطع المفاجئ عند الإيقاف.",
+    "settings.playback.fadeDuration": "مدة التلاشي",
+    "settings.playback.fadeDurationHint": "مدة تلاشي الإيقاف المؤقت/الإيقاف.",
+    "settings.playback.crossfadeManual": "انتقال متداخل عند تغيير المقاطع",
+    "settings.playback.crossfadeManualHint": "يجعل الانتقال إلى السابق/التالي أكثر سلاسة.",
+    "settings.playback.crossfadeAuto": "انتقال متداخل تلقائي قبل نهاية المقطع",
+    "settings.playback.crossfadeAutoHint": "ينتقل إلى المقطع التالي بسلاسة قرب النهاية.",
+    "settings.playback.crossfadeDuration": "مدة الانتقال المتداخل",
+    "settings.playback.crossfadeDurationHint": "المدة المستخدمة في الانتقالات اليدوية والتلقائية.",
+    "settings.behavior.languageSection": "اختيار اللغة",
+    "settings.behavior.languageLabel": "اللغة",
+    "settings.behavior.languageHint": "يتطلب تغيير اللغة إعادة تشغيل بعد الحفظ.",
+    "settings.behavior.appearanceSection": "المظهر",
+    "settings.behavior.themeLabel": "السمة",
+    "settings.behavior.themeHint": "يغير ألوان التطبيق مباشرة.",
+    "settings.behavior.followSystemTheme": "اتباع سمة النظام",
+    "settings.behavior.followSystemThemeHint": "عند التفعيل يتبع التطبيق تفضيل النظام للوضع الفاتح أو الداكن.",
+    "settings.behavior.startupSection": "سلوك بدء التشغيل",
+    "settings.behavior.rememberLastSection": "تذكر آخر قسم رئيسي",
+    "settings.behavior.rememberLastSectionHint": "يفتح التطبيق القسم الرئيسي الذي استخدمته آخر مرة.",
+    "settings.behavior.startupPageLabel": "قسم البدء الافتراضي",
+    "settings.behavior.startupPageHint": "يستخدم عندما يكون تذكر آخر قسم متوقفا.",
+    "settings.behavior.startupPageMusic": "الوسائط (الصوت)",
+    "settings.behavior.startupPageVideo": "الفيديو",
+    "settings.behavior.startupPageGallery": "المعرض",
+    "settings.behavior.startupPageWeb": "الويب",
+    "settings.behavior.startupPageListen": "الاستماع",
+    "settings.behavior.restartTitle": "إعادة التشغيل مطلوبة",
+    "settings.behavior.restartMessage": "يجب إعادة تشغيل التطبيق لتطبيق تغيير اللغة. هل تريد إعادة التشغيل الآن؟",
+    "settings.web.general": "عام",
+    "settings.web.enable": "تفعيل تجربة الويب",
+    "settings.web.defaultPlatform": "المنصة الافتراضية",
+    "settings.web.defaultPlatformHint": "المنصة التي يتم اختيارها عند فتح تبويب الويب لأول مرة",
+    "settings.web.rememberPlatform": "تذكر آخر منصة ويب مستخدمة",
+    "settings.web.restoreSession": "استعادة نفس المنصة إذا أُغلق التطبيق على تبويب الويب",
+    "settings.web.suspendInactive": "إغلاق جلسة الويب عندما يكون التبويب غير نشط",
+    "settings.web.startupDelay": "تأخير تحميل الويب عند البدء",
+    "settings.web.startupDelayHint": "يؤخر تشغيل WebView الأول على الأنظمة البطيئة",
+    "settings.web.delayInstant": "فوري (0 ث)",
+    "settings.web.delayShort": "قصير (0.35 ث)",
+    "settings.web.delayBalanced": "متوازن (0.7 ث)",
+    "settings.web.delaySlow": "نظام بطيء (1.2 ث)",
+    "settings.web.appearance": "المظهر والحركة",
+    "settings.web.animation": "حركة واجهة الويب",
+    "settings.web.animationHint": "طريقة تعامل الشريط العلوي والجانبي مع محتوى الويب",
+    "settings.web.animationCompact": "مضغوط",
+    "settings.web.animationDock": "نمط Dock",
+    "settings.web.motion": "سرعة حركة الويب",
+    "settings.web.motionHint": "إيقاع إخفاء وإظهار الأشرطة",
+    "settings.web.motionCalm": "هادئ",
+    "settings.web.motionBalanced": "متوازن",
+    "settings.web.motionFast": "سريع",
+    "settings.web.autoHide": "إخفاء الشريط العلوي والجانبي تلقائيًا أثناء المشاهدة",
+    "settings.web.lowPower": "وضع النظام الضعيف لحركات الويب",
+    "settings.web.autoHideDelay": "مدة الإخفاء التلقائي",
+    "settings.web.autoHideDelayHint": "الانتظار بعد توقف حركة الفأرة",
+    "settings.web.autoRecover": "إعادة تحميل شاشات الويب الفارغة تلقائيًا عند البدء",
+    "settings.web.privacy": "الخصوصية والبيانات",
+    "settings.web.privacyInfo": "عند تفعيل الجلسات الدائمة تُحفظ تسجيلات دخول الويب في مجلد ملف محلي محمي للمستخدم الحالي.",
+    "settings.web.persistent": "الاحتفاظ بالجلسات الدائمة",
+    "settings.web.private": "وضع ويب خاص",
+    "settings.web.clearCacheOnQuit": "مسح ذاكرة الويب المؤقتة عند إغلاق التطبيق",
+    "settings.web.clearCookiesOnQuit": "مسح ملفات تعريف الارتباط عند إغلاق التطبيق",
+    "settings.web.clearSiteDataOnQuit": "مسح بيانات المواقع عند إغلاق التطبيق",
+    "settings.web.preferHttps": "فتح عناوين HTTP كـ HTTPS عند الإمكان",
+    "settings.web.reduceWebRtc": "تقليل تسرب IP عبر WebRTC",
+    "settings.web.stripTracking": "إزالة معاملات التتبع المعروفة",
+    "settings.web.blockThirdParty": "حظر ملفات تعريف ارتباط الطرف الثالث",
+    "settings.web.clearCache": "مسح الذاكرة المؤقتة",
+    "settings.web.clearCookies": "مسح ملفات الارتباط",
+    "settings.web.clearSiteData": "مسح بيانات المواقع",
+    "settings.web.clearAll": "مسح جلسات الويب",
+    "settings.web.clearing": "جار مسح {target}...",
+    "settings.web.cleared": "تم مسح {target}.",
+    "settings.web.clearFailed": "تعذر مسح {target}.",
+    "settings.web.permissions": "الأذونات والسياسة",
+    "settings.web.userAgent": "وكيل المستخدم",
+    "settings.web.userAgentHint": "نوع عرض الويب الذي يتم إبلاغ المنصات به",
+    "settings.web.uaDesktop": "سطح المكتب",
+    "settings.web.uaMobile": "الجوال",
+    "settings.web.uaDefault": "افتراضي",
+    "settings.web.autoplay": "تشغيل تلقائي",
+    "settings.web.autoplayHint": "طريقة بدء المواقع للوسائط",
+    "settings.web.autoplayAllow": "السماح",
+    "settings.web.autoplayGesture": "طلب تفاعل المستخدم",
+    "settings.web.autoplayBlock": "حظر",
+    "settings.web.allowCamera": "السماح بإذن الكاميرا",
+    "settings.web.allowMicrophone": "السماح بإذن الميكروفون",
+    "settings.web.allowLocation": "السماح بإذن الموقع",
+    "settings.web.allowNotifications": "السماح بالإشعارات",
+    "settings.web.allowPopups": "السماح بالنوافذ المنبثقة",
+    "library.title": "المكتبة",
+    "library.collapseOpen": "إظهار شريط التبويبات",
+    "library.collapseHide": "إخفاء شريط التبويبات",
+    "library.openVideo": "فتح فيديو",
+    "library.addMusic": "إضافة إلى المكتبة",
+    "library.videoReady": "{count} فيديو جاهز",
+    "library.musicReady": "{count} أغنية جاهزة",
+    "library.pickVideo": "اختر ملف فيديو محلي",
+    "library.root": "المكتبة الرئيسية",
+    "library.collection": "المجموعة",
+    "library.nowPlaying": "يتم التشغيل الآن",
+    "library.queue": "قائمة الانتظار",
+    "library.search": "ابحث في المكتبة...",
+    "library.savedFolders": "المجلدات المحفوظة",
+    "library.localVideo": "فيديو محلي",
+    "library.localMusic": "موسيقى محلية",
+    "library.shown": "المعروض: {count}",
+    "library.cleanMissing": "تنظيف الملفات المفقودة",
+    "nav.back": "رجوع",
+    "nav.forward": "تقدم",
+    "nav.refresh": "تحديث",
+    "nav.viewSettings": "إعدادات العرض",
+    "nav.musicViewSettings": "إعدادات عرض الموسيقى",
+    "nav.list": "قائمة",
+    "nav.compact": "مضغوط",
+    "nav.comfortable": "مريح",
+    "nav.card": "بطاقات",
+    "nav.nowPlaying": "يتم التشغيل الآن: {name}",
+    "music.emptyTitle": "مكتبة الموسيقى فارغة",
+    "music.emptyHint": "أضف ملفات MP3 أو FLAC أو WAV أو OGG أو M4A أو OPUS.",
+    "music.noResultsTitle": "لم يتم العثور على نتائج",
+    "music.noResultsHint": "غيّر مرشح البحث وحاول مرة أخرى في المكتبة.",
+    "music.playing": "قيد التشغيل",
+    "video.emptyTitle": "مكتبة الفيديو فارغة",
+    "video.emptyHint": "أضف ملفات MP4 أو MKV أو WebM أو MOV أو AVI.",
+    "video.noResultsHint": "غيّر مرشح البحث وحاول مرة أخرى في مكتبة الفيديو.",
+    "video.back": "رجوع",
+    "video.fullscreen": "ملء الشاشة",
+    "video.play": "تشغيل الفيديو",
+    "video.miniPlayer": "مشغل مصغر",
+    "video.restore": "إرجاع إلى مساحة العمل",
+    "video.closeMini": "إغلاق المشغل المصغر",
+    "video.position": "موضع الفيديو",
+    "video.quality": "الجودة",
+    "video.auto": "تلقائي",
+    "video.stableVolume": "صوت ثابت",
+    "video.volumeBoost": "تعزيز الصوت",
+    "video.cinematicLight": "إضاءة سينمائية",
+    "video.captions": "التعليقات",
+    "video.subtitles": "الترجمات (1)",
+    "video.sleepTimer": "مؤقت النوم",
+    "video.closed": "مغلق",
+    "video.open": "مفتوح",
+    "video.speed": "سرعة التشغيل",
+    "video.normal": "عادي",
+    "player.position": "موضع التشغيل",
+    "player.clear": "مسح",
+    "player.shuffle": "خلط",
+    "player.previous": "السابق",
+    "player.rewind10": "رجوع 10 ث",
+    "player.playPause": "تشغيل / إيقاف مؤقت",
+    "player.forward10": "تقدم 10 ث",
+    "player.next": "التالي",
+    "player.repeat": "تكرار",
+    "player.repeatOne": "تكرار الأغنية الحالية",
+    "player.unmute": "تشغيل الصوت",
+    "player.mute": "كتم",
+    "player.volume": "مستوى الصوت",
+    "common.removeFromLibrary": "إزالة من المكتبة",
+    "sfx.windowTitle": "المؤثرات الصوتية ({scope}) - ArDali",
+    "sfx.scope.music": "الموسيقى",
+    "sfx.scope.video": "الفيديو",
+    "sfx.scope.web": "الويب",
+    "sfx.enableEffects": "تفعيل المؤثرات الصوتية",
+    "sfx.lightColor": "لون الضوء",
+    "sfx.light.cyan": "أزرق سماوي",
+    "sfx.light.rainbow": "قوس قزح",
+    "sfx.light.blue": "أزرق",
+    "sfx.light.purple": "بنفسجي",
+    "sfx.light.green": "أخضر",
+    "sfx.light.amber": "كهرماني",
+    "sfx.light.red": "أحمر",
+    "sfx.light.off": "إيقاف",
+    "sfx.status": "DSP: {state} • النطاق: {scope} • النشط: {active}",
+    "sfx.on": "مفعل",
+    "sfx.off": "متوقف",
+    "sfx.enabled": "مفعل",
+    "sfx.presets": "إعدادات جاهزة",
+    "sfx.reset": "إعادة ضبط",
+    "sfx.module": "وحدة ArDali",
+    "sfx.resetModule": "إعادة ضبط الوحدة",
+    "sfx.balance": "التوازن (يسار ↔ يمين)",
+    "sfx.center": "الوسط",
+    "sfx.resize": "تغيير حجم النافذة",
+    "sfx.stereoField": "محاكاة مجال الستيريو",
+    "sfx.dspStatus": "حالة DSP: {state} | Loaded: {loaded}",
+    "sfx.connected": "متصل",
+    "sfx.waiting": "بانتظار",
+    "sfx.headphonesDetected": "تم التعرف على {device} كسماعات. Crossfeed مناسب للاستخدام.",
+    "sfx.speakersDetected": "تم التعرف على {device} كمخرج سماعات/Line. Crossfeed غالبا غير ضروري.",
+    "sfx.outputUnknown": "تعذر قراءة معلومات الخرج. يبقى Crossfeed في الوضع اليدوي.",
+    "sfx.crossfeedAuto": "تشغيل/إيقاف Crossfeed تلقائيا حسب اتصال السماعات",
+    "sfx.lowHighCut": "Low Cut {low} Hz • High Cut {high} Hz",
+    "sfx.truePeakMeters": "عدادات Stereo True Peak",
+    "sfx.clipping": "Clipping:",
+    "sfx.oversampling": "Oversampling:",
+    "sfx.stereoLink": "ربط الستيريو",
+    "sfx.truePeakActive": "المحدد مفعل: Clipping {clip}، GR الحالي {gr} dB.",
+    "sfx.truePeakIdle": "المحدد متوقف: العداد وعدّاد clipping في الانتظار.",
+    "sfx.slope": "الميل",
+    "sfx.bassMonoNote": "الترددات تحت Cutoff تُجمع في مركز mono؛ النطاق العلوي يحافظ على عرض الستيريو أو يوسعه.",
+    "eqPresets.title": "إعدادات جاهزة",
+    "eqPresets.windowTitle": "إعدادات ArDali الجاهزة - ArDali Media Player",
+    "eqPresets.search": "ابحث في الإعدادات...",
+    "eqPresets.viewMode": "وضع العرض",
+    "eqPresets.quality": "كامل",
+    "eqPresets.balanced": "متوازن",
+    "eqPresets.performance": "أدنى",
+    "eqPresets.category": "الفئة",
+    "eqPresets.shown": "المعروض: {visible} / {total} • المجموعة: {group}",
+    "eqPresets.loadError": "تعذر تحميل الإعدادات الجاهزة",
+    "eqPresets.hintQuality": "الوضع الكامل: كل الحركات والمؤثرات المرئية فعالة.",
+    "eqPresets.hintBalanced": "الوضع المتوازن: الحركات أبسط والأداء أكثر ثباتا.",
+    "eqPresets.hintPerformance": "الوضع الأدنى: أخف عرض مع أقل حركة ومؤثرات.",
+  },
+  "es-ES": {
+    "app.title": "ArDali WebMedia",
+    "common.cancel": "Cancelar",
+    "common.close": "Cerrar",
+    "common.save": "Guardar",
+    "common.resetDefaults": "Restablecer por defecto",
+    "common.yes": "Sí",
+    "common.no": "No",
+    "window.minimize": "Minimizar",
+    "window.maximize": "Maximizar",
+    "rail.video": "Vídeos",
+    "rail.music": "Música",
+    "rail.gallery": "Galería",
+    "rail.web": "Web",
+    "rail.listen": "Escuchar",
+    "rail.downloads": "Descargas",
+    "rail.soundEffects": "Efectos de sonido",
+    "rail.visualizer": "Visualizador",
+    "rail.settings": "Ajustes",
+    "rail.about": "Acerca de",
+    "settings.title": "Preferencias",
+    "settings.aria": "Secciones de ajustes",
+    "settings.tabs.web": "Ajustes web",
+    "settings.tabs.playback": "Reproducción",
+    "settings.tabs.keyboard": "Atajos de teclado",
+    "settings.tabs.listen": "Escuchar",
+    "settings.tabs.behavior": "Comportamiento",
+    "settings.tabs.security": "Seguridad",
+    "settings.tabs.library": "Biblioteca multimedia",
+    "settings.tabs.gallery": "Galería",
+    "settings.tabs.audio": "Salida de audio",
+    "settings.theme.aur": "ArDali Media Player",
+    "settings.theme.performanceBalanced": "Flujo equilibrado",
+    "settings.theme.performanceLite": "Estable para hardware bajo",
+    "settings.theme.ardali": "ArDali",
+    "settings.theme.dark": "Oscuro",
+    "settings.theme.black": "Negro",
+    "settings.theme.light": "Claro",
+    "settings.theme.frappe": "Frappé",
+    "settings.theme.onedark": "One Dark",
+    "settings.theme.matrix": "Matrix",
+    "settings.theme.latte": "Latte",
+    "settings.theme.solarizedDark": "Solarized Dark",
+    "settings.theme.neonNight": "Noche neón",
+    "settings.theme.retroAmber": "Ámbar retro",
+    "settings.theme.deepOcean": "Océano profundo",
+    "settings.theme.forestMint": "Menta bosque",
+    "settings.keyboard.media": "Atajos multimedia",
+    "settings.keyboard.sections": "Secciones principales",
+    "settings.keyboard.tools": "Herramientas",
+    "settings.keyboard.playPause": "Reproducir / pausar",
+    "settings.keyboard.previous": "Pista anterior",
+    "settings.keyboard.next": "Pista siguiente",
+    "settings.keyboard.mute": "Silenciar / activar sonido",
+    "settings.keyboard.seekBack": "Retroceder 5 segundos",
+    "settings.keyboard.seekForward": "Avanzar 5 segundos",
+    "settings.keyboard.music": "Música",
+    "settings.keyboard.video": "Video",
+    "settings.keyboard.gallery": "Galería",
+    "settings.keyboard.web": "Web",
+    "settings.keyboard.settings": "Ajustes",
+    "settings.keyboard.soundEffects": "Efectos de sonido",
+    "settings.keyboard.visualizer": "Visualizador",
+    "settings.keyboard.fullscreen": "Pantalla completa",
+    "settings.playback.startupSection": "Inicio",
+    "settings.playback.restoreLastTrack": "Restaurar la última pista al iniciar",
+    "settings.playback.restoreLastTrackHint": "Prepara la última pista seleccionada al abrir la app.",
+    "settings.playback.autoplayLastTrack": "Reproducir automáticamente la última pista",
+    "settings.playback.autoplayLastTrackHint": "Inicia la reproducción después de restaurar la última pista.",
+    "settings.playback.resumePosition": "Continuar la última pista desde su posición guardada",
+    "settings.playback.resumePositionHint": "Empieza desde el tiempo guardado en vez del inicio.",
+    "settings.playback.transitionsSection": "Transiciones",
+    "settings.playback.fadeOnPause": "Fundido al pausar",
+    "settings.playback.fadeOnPauseHint": "Baja el sonido con un fundido corto antes de pausar.",
+    "settings.playback.fadeOnStop": "Fundido al detener",
+    "settings.playback.fadeOnStopHint": "Reduce cortes bruscos al detener.",
+    "settings.playback.fadeDuration": "Duración del fundido",
+    "settings.playback.fadeDurationHint": "Duración de los fundidos de pausa/detención.",
+    "settings.playback.crossfadeManual": "Crossfade al cambiar de pista",
+    "settings.playback.crossfadeManualHint": "Suaviza los cambios anterior/siguiente.",
+    "settings.playback.crossfadeAuto": "Crossfade automático antes de que termine la pista",
+    "settings.playback.crossfadeAutoHint": "Pasa a la siguiente pista suavemente cerca del final.",
+    "settings.playback.crossfadeDuration": "Duración del crossfade",
+    "settings.playback.crossfadeDurationHint": "Duración usada en transiciones manuales y automáticas.",
+    "settings.behavior.languageSection": "Selección de idioma",
+    "settings.behavior.languageLabel": "Idioma",
+    "settings.behavior.languageHint": "Cambiar el idioma requiere reiniciar después de guardar.",
+    "settings.behavior.appearanceSection": "Apariencia",
+    "settings.behavior.themeLabel": "Tema",
+    "settings.behavior.themeHint": "Cambia los colores de la aplicación al instante.",
+    "settings.behavior.followSystemTheme": "Seguir el tema del sistema",
+    "settings.behavior.followSystemThemeHint": "Si está activo, la app sigue la preferencia clara/oscura del sistema.",
+    "settings.behavior.startupSection": "Comportamiento de inicio",
+    "settings.behavior.rememberLastSection": "Recordar la última sección principal",
+    "settings.behavior.rememberLastSectionHint": "La app abre la sección principal usada por última vez.",
+    "settings.behavior.startupPageLabel": "Sección de inicio predeterminada",
+    "settings.behavior.startupPageHint": "Se usa cuando recordar la última sección está desactivado.",
+    "settings.behavior.startupPageMusic": "Medios (audio)",
+    "settings.behavior.startupPageVideo": "Video",
+    "settings.behavior.startupPageGallery": "Galería",
+    "settings.behavior.startupPageWeb": "Web",
+    "settings.behavior.startupPageListen": "Escuchar",
+    "settings.behavior.restartTitle": "Reinicio requerido",
+    "settings.behavior.restartMessage": "La aplicación debe reiniciarse para aplicar el cambio de idioma. ¿Reiniciar ahora?",
+    "settings.web.general": "General",
+    "settings.web.enable": "Activar experiencia web",
+    "settings.web.defaultPlatform": "Plataforma predeterminada",
+    "settings.web.defaultPlatformHint": "La plataforma elegida al abrir la pestaña Web por primera vez",
+    "settings.web.rememberPlatform": "Recordar la última plataforma web usada",
+    "settings.web.restoreSession": "Restaurar la misma plataforma si la app se cerró en la pestaña Web",
+    "settings.web.suspendInactive": "Cerrar la sesión web cuando la pestaña Web esté inactiva",
+    "settings.web.startupDelay": "Retraso de carga web al iniciar",
+    "settings.web.startupDelayHint": "Retrasa el primer inicio de WebView en sistemas lentos",
+    "settings.web.delayInstant": "Instantáneo (0 s)",
+    "settings.web.delayShort": "Corto (0.35 s)",
+    "settings.web.delayBalanced": "Equilibrado (0.7 s)",
+    "settings.web.delaySlow": "Sistema lento (1.2 s)",
+    "settings.web.appearance": "Apariencia y movimiento",
+    "settings.web.animation": "Animación de interfaz web",
+    "settings.web.animationHint": "Cómo se comportan las barras superior y lateral con el contenido web",
+    "settings.web.animationCompact": "Compacto",
+    "settings.web.animationDock": "Estilo Dock",
+    "settings.web.motion": "Velocidad de animación web",
+    "settings.web.motionHint": "El ritmo para ocultar/mostrar las barras",
+    "settings.web.motionCalm": "Calma",
+    "settings.web.motionBalanced": "Equilibrada",
+    "settings.web.motionFast": "Rápida",
+    "settings.web.autoHide": "Ocultar automáticamente las barras superior y lateral al mirar",
+    "settings.web.lowPower": "Modo de bajo consumo para animaciones web",
+    "settings.web.autoHideDelay": "Tiempo de ocultación automática",
+    "settings.web.autoHideDelayHint": "Espera después de que se detenga el movimiento del ratón",
+    "settings.web.autoRecover": "Recargar automáticamente pantallas web vacías al iniciar",
+    "settings.web.privacy": "Privacidad y datos",
+    "settings.web.privacyInfo": "Cuando las sesiones persistentes están activas, los inicios de sesión web se guardan en la carpeta de perfil local protegida para el usuario Linux actual.",
+    "settings.web.persistent": "Conservar sesiones persistentes",
+    "settings.web.private": "Modo web privado",
+    "settings.web.clearCacheOnQuit": "Limpiar caché web al salir",
+    "settings.web.clearCookiesOnQuit": "Limpiar cookies web al salir",
+    "settings.web.clearSiteDataOnQuit": "Limpiar datos del sitio al salir",
+    "settings.web.preferHttps": "Abrir direcciones HTTP como HTTPS cuando sea posible",
+    "settings.web.reduceWebRtc": "Reducir fugas de IP por WebRTC",
+    "settings.web.stripTracking": "Eliminar parámetros de seguimiento conocidos",
+    "settings.web.blockThirdParty": "Bloquear cookies de terceros",
+    "settings.web.clearCache": "Limpiar caché",
+    "settings.web.clearCookies": "Limpiar cookies",
+    "settings.web.clearSiteData": "Limpiar datos del sitio",
+    "settings.web.clearAll": "Limpiar sesiones web",
+    "settings.web.clearing": "Limpiando {target}...",
+    "settings.web.cleared": "{target} limpiado.",
+    "settings.web.clearFailed": "No se pudo limpiar {target}.",
+    "settings.web.permissions": "Permisos y política",
+    "settings.web.userAgent": "Agente de usuario",
+    "settings.web.userAgentHint": "Tipo de vista web informado a las plataformas",
+    "settings.web.uaDesktop": "Escritorio",
+    "settings.web.uaMobile": "Móvil",
+    "settings.web.uaDefault": "Predeterminado",
+    "settings.web.autoplay": "Reproducción automática",
+    "settings.web.autoplayHint": "Cómo pueden iniciar medios los sitios web",
+    "settings.web.autoplayAllow": "Permitir",
+    "settings.web.autoplayGesture": "Requerir interacción del usuario",
+    "settings.web.autoplayBlock": "Bloquear",
+    "settings.web.allowCamera": "Permitir cámara",
+    "settings.web.allowMicrophone": "Permitir micrófono",
+    "settings.web.allowLocation": "Permitir ubicación",
+    "settings.web.allowNotifications": "Permitir notificaciones",
+    "settings.web.allowPopups": "Permitir ventanas emergentes",
+    "library.title": "BIBLIOTECA",
+    "library.collapseOpen": "Mostrar barra de pestañas",
+    "library.collapseHide": "Ocultar barra de pestañas",
+    "library.openVideo": "Abrir vídeo",
+    "library.addMusic": "Añadir a la biblioteca",
+    "library.videoReady": "{count} vídeos listos",
+    "library.musicReady": "{count} canciones listas",
+    "library.pickVideo": "Seleccionar archivo de vídeo local",
+    "library.root": "Biblioteca raíz",
+    "library.collection": "Colección",
+    "library.nowPlaying": "Reproduciendo ahora",
+    "library.queue": "Cola",
+    "library.search": "Buscar en la biblioteca...",
+    "library.savedFolders": "CARPETAS GUARDADAS",
+    "library.localVideo": "Vídeo local",
+    "library.localMusic": "Música local",
+    "library.shown": "Mostrado: {count}",
+    "library.cleanMissing": "Limpiar archivos faltantes",
+    "nav.back": "Atrás",
+    "nav.forward": "Adelante",
+    "nav.refresh": "Actualizar",
+    "nav.viewSettings": "Ajustes de vista",
+    "nav.musicViewSettings": "Ajustes de vista de música",
+    "nav.list": "Lista",
+    "nav.compact": "Compacto",
+    "nav.comfortable": "Cómodo",
+    "nav.card": "Tarjeta",
+    "nav.nowPlaying": "Reproduciendo: {name}",
+    "music.emptyTitle": "La biblioteca de música está vacía",
+    "music.emptyHint": "Añade archivos MP3, FLAC, WAV, OGG, M4A u OPUS.",
+    "music.noResultsTitle": "No se encontraron resultados",
+    "music.noResultsHint": "Cambia el filtro de búsqueda e inténtalo de nuevo.",
+    "music.playing": "Reproduciendo",
+    "video.emptyTitle": "La biblioteca de vídeo está vacía",
+    "video.emptyHint": "Añade archivos MP4, MKV, WebM, MOV o AVI.",
+    "video.noResultsHint": "Cambia el filtro de búsqueda e inténtalo en la biblioteca de vídeo.",
+    "video.back": "Atrás",
+    "video.fullscreen": "Pantalla completa",
+    "video.play": "Reproducir vídeo",
+    "video.miniPlayer": "Mini reproductor",
+    "video.restore": "Volver al área de trabajo",
+    "video.closeMini": "Cerrar mini reproductor",
+    "video.position": "Posición del vídeo",
+    "video.quality": "Calidad",
+    "video.auto": "Auto",
+    "video.stableVolume": "Volumen estable",
+    "video.volumeBoost": "Aumento de volumen",
+    "video.cinematicLight": "Iluminación cinemática",
+    "video.captions": "Subtítulos",
+    "video.subtitles": "Subtítulos (1)",
+    "video.sleepTimer": "Temporizador de sueño",
+    "video.closed": "Cerrado",
+    "video.open": "Abierto",
+    "video.speed": "Velocidad de reproducción",
+    "video.normal": "Normal",
+    "player.position": "Posición de reproducción",
+    "player.clear": "Limpiar",
+    "player.shuffle": "Aleatorio",
+    "player.previous": "Anterior",
+    "player.rewind10": "Retroceder 10 s",
+    "player.playPause": "Reproducir / Pausar",
+    "player.forward10": "Avanzar 10 s",
+    "player.next": "Siguiente",
+    "player.repeat": "Repetir",
+    "player.repeatOne": "Repetir canción actual",
+    "player.unmute": "Activar sonido",
+    "player.mute": "Silenciar",
+    "player.volume": "Volumen",
+    "common.removeFromLibrary": "Quitar de la biblioteca",
+    "sfx.windowTitle": "Efectos de sonido ({scope}) - ArDali",
+    "sfx.scope.music": "Música",
+    "sfx.scope.video": "Vídeo",
+    "sfx.scope.web": "Web",
+    "sfx.enableEffects": "Activar efectos de sonido",
+    "sfx.lightColor": "Color de luz",
+    "sfx.light.cyan": "Azul cielo",
+    "sfx.light.rainbow": "Arcoíris",
+    "sfx.light.blue": "Azul",
+    "sfx.light.purple": "Morado",
+    "sfx.light.green": "Verde",
+    "sfx.light.amber": "Ámbar",
+    "sfx.light.red": "Rojo",
+    "sfx.light.off": "Apagado",
+    "sfx.status": "DSP: {state} • Alcance: {scope} • Activo: {active}",
+    "sfx.on": "Activo",
+    "sfx.off": "Apagado",
+    "sfx.enabled": "Activado",
+    "sfx.presets": "Ajustes listos",
+    "sfx.reset": "Restablecer",
+    "sfx.module": "Módulo ArDali",
+    "sfx.resetModule": "Restablecer módulo",
+    "sfx.balance": "Balance (Izq ↔ Der)",
+    "sfx.center": "Centro",
+    "sfx.resize": "Cambiar tamaño de ventana",
+    "sfx.stereoField": "Simulación de campo estéreo",
+    "sfx.dspStatus": "Estado DSP: {state} | Loaded: {loaded}",
+    "sfx.connected": "Conectado",
+    "sfx.waiting": "Esperando",
+    "sfx.headphonesDetected": "{device} detectado como auriculares. Crossfeed es adecuado.",
+    "sfx.speakersDetected": "{device} detectado como altavoz/salida line. Crossfeed normalmente no es necesario.",
+    "sfx.outputUnknown": "No se pudo leer la salida. Crossfeed queda en modo manual.",
+    "sfx.crossfeedAuto": "Activar/desactivar crossfeed automáticamente con auriculares",
+    "sfx.lowHighCut": "Low Cut {low} Hz • High Cut {high} Hz",
+    "sfx.truePeakMeters": "Medidores Stereo True Peak",
+    "sfx.clipping": "Clipping:",
+    "sfx.oversampling": "Oversampling:",
+    "sfx.stereoLink": "Stereo Link",
+    "sfx.truePeakActive": "Limitador activo: Clipping {clip}, GR actual {gr} dB.",
+    "sfx.truePeakIdle": "Limitador apagado: medidor y contador de clipping en espera.",
+    "sfx.slope": "Pendiente",
+    "sfx.bassMonoNote": "Las frecuencias bajo el cutoff se suman al centro mono; la banda superior conserva o amplía la anchura estéreo.",
+    "eqPresets.title": "Ajustes listos",
+    "eqPresets.windowTitle": "Ajustes listos ArDali - ArDali Media Player",
+    "eqPresets.search": "Buscar ajuste...",
+    "eqPresets.viewMode": "Modo de vista",
+    "eqPresets.quality": "Completo",
+    "eqPresets.balanced": "Equilibrado",
+    "eqPresets.performance": "Mínimo",
+    "eqPresets.category": "Categoría",
+    "eqPresets.shown": "Mostrados: {visible} / {total} • Grupo: {group}",
+    "eqPresets.loadError": "No se pudieron cargar los ajustes",
+    "eqPresets.hintQuality": "Modo completo: todas las animaciones y efectos visuales activos.",
+    "eqPresets.hintBalanced": "Modo equilibrado: animaciones simplificadas y rendimiento más estable.",
+    "eqPresets.hintPerformance": "Modo mínimo: vista más ligera con animación y efectos mínimos.",
+  },
+};
+
+function tr(language: AppLanguage, key: string) {
+  return i18n[language]?.[key] ?? i18n["tr-TR"][key] ?? key;
+}
+
+function formatLabel(template: string, values: Record<string, string | number>) {
+  return Object.entries(values).reduce((label, [key, value]) => label.split(`{${key}}`).join(String(value)), template);
+}
+
+const sfxEffectTranslations: Record<AppLanguage, Record<SfxEffectId, { title: string; description: string }>> = {
+  "tr-TR": {
+    audiophile: { title: "Ses Çıkışı (Odyofil)", description: "Sistem mikseri, çıkış cihazı, sample rate ve preamp davranışını yönetir." },
+    eq32: { title: "32-Bantlı Profesyonel Ekolayzır", description: "Hassas frekans kontrolü, ton tekerlekleri, stereo genişlik ve balans." },
+    reverb: { title: "Reverb (BASS FX)", description: "Oda boyutu, damping, ıslak/kuru oran ve giriş kazancı." },
+    compressor: { title: "Dinamik Kompresör", description: "Threshold, ratio, attack, release, makeup gain ve knee ayarları." },
+    limiter: { title: "Limiter", description: "Tepe kontrolü, lookahead ve çıkış tavan seviyesi." },
+    bassboost: { title: "Bas Güçlendirici", description: "Alt frekans ağırlığı, harmonik miktarı, genişlik ve miks." },
+    autogain: { title: "Auto Gain / Normalize", description: "Hedef loudness, maksimum kazanç ve tepki hızı." },
+    truepeak: { title: "True Peak Limiter + Meter", description: "Oversampling, drive, ceiling ve kanal bağlama." },
+    peq: { title: "Parametrik EQ (PEQ)", description: "Altı bant parametrik frekans, Q ve gain kontrolü." },
+    dynamiceq: { title: "Dynamic EQ", description: "Eşik kontrollü dinamik frekans azaltma/artırma." },
+    exciter: { title: "Netleştirici (Exciter)", description: "Üst harmonikler ve parlaklık miks kontrolü." },
+    deesser: { title: "De-esser", description: "Sert sibilansları yumuşatmak için frekans ve threshold." },
+    noisegate: { title: "Akıllı Noise Gate", description: "Arka plan gürültüsünü eşik, hold ve release ile azaltır." },
+    stereowidener: { title: "Stereo Widener v2", description: "Merkez/yan seviye, bass mono ve stereo genişlik." },
+    echo: { title: "Echo (Yankı)", description: "Delay, feedback, wet/dry ve high-cut kontrolü." },
+    softecho: { title: "Saf Echo (Soft)", description: "Daha yumuşak atmosferik echo ayarları." },
+    convreverb: { title: "Konvolüsyon Reverb (IR)", description: "Impuls yanıtlı mekan hissi, predelay ve mix." },
+    crossfeed: { title: "Crossfeed (Kulaklık)", description: "Kulaklıkta daha doğal stereo sahne için kanal sızıntısı." },
+    surround: { title: "Surround (5.1/7.1)", description: "Merkez, surround, LFE, crossover, delay ve mix ayarları." },
+    bassmono: { title: "Bass Mono", description: "Düşük frekansları mono merkeze alır ve stereo tabanı temizler." },
+    tapesat: { title: "Tape Saturation", description: "Analog bant sıcaklığı, drive, ton ve hafif hiss kontrolü." },
+    bitdither: { title: "Bit-depth / Dither", description: "Bit derinliği, dither, noise shaping ve retro örnekleme." },
+  },
+  "en-US": {
+    audiophile: { title: "Audio Output (Audiophile)", description: "Controls the system mixer, output device, sample rate and preamp behavior." },
+    eq32: { title: "32-Band Professional Equalizer", description: "Precise frequency control, tone wheels, stereo width and balance." },
+    reverb: { title: "Reverb (BASS FX)", description: "Room size, damping, wet/dry blend and input gain." },
+    compressor: { title: "Dynamic Compressor", description: "Threshold, ratio, attack, release, makeup gain and knee controls." },
+    limiter: { title: "Limiter", description: "Peak control, lookahead and output ceiling." },
+    bassboost: { title: "Bass Booster", description: "Low-frequency weight, harmonics, width and mix." },
+    autogain: { title: "Auto Gain / Normalize", description: "Target loudness, maximum gain and response speed." },
+    truepeak: { title: "True Peak Limiter + Meter", description: "Oversampling, drive, ceiling and channel linking." },
+    peq: { title: "Parametric EQ (PEQ)", description: "Six-band parametric frequency, Q and gain control." },
+    dynamiceq: { title: "Dynamic EQ", description: "Threshold-controlled dynamic frequency reduction or boost." },
+    exciter: { title: "Exciter / Clarity", description: "Upper harmonics and brightness mix control." },
+    deesser: { title: "De-esser", description: "Frequency and threshold control for softening harsh sibilance." },
+    noisegate: { title: "Smart Noise Gate", description: "Reduces background noise with threshold, hold and release." },
+    stereowidener: { title: "Stereo Widener v2", description: "Mid/side level, bass mono and stereo width." },
+    echo: { title: "Echo", description: "Delay, feedback, wet/dry and high-cut control." },
+    softecho: { title: "Soft Echo", description: "Softer atmospheric echo settings." },
+    convreverb: { title: "Convolution Reverb (IR)", description: "Impulse-response space, predelay and mix." },
+    crossfeed: { title: "Crossfeed (Headphones)", description: "Channel bleed for a more natural headphone stereo stage." },
+    surround: { title: "Surround (5.1/7.1)", description: "Center, surround, LFE, crossover, delay and mix settings." },
+    bassmono: { title: "Bass Mono", description: "Centers low frequencies and cleans the stereo foundation." },
+    tapesat: { title: "Tape Saturation", description: "Analog tape warmth, drive, tone and light hiss control." },
+    bitdither: { title: "Bit-depth / Dither", description: "Bit depth, dither, noise shaping and retro resampling." },
+  },
+  "ar-SA": {
+    audiophile: { title: "مخرج الصوت (أوديوفيل)", description: "يتحكم في خالط النظام وجهاز الخرج ومعدل العينة وسلوك التضخيم المسبق." },
+    eq32: { title: "معادل احترافي 32 نطاقا", description: "تحكم دقيق في الترددات وعجلات النغمة وعرض الستيريو والتوازن." },
+    reverb: { title: "صدى (BASS FX)", description: "حجم الغرفة والتخميد ونسبة الرطب/الجاف وكسب الإدخال." },
+    compressor: { title: "ضاغط ديناميكي", description: "إعدادات العتبة والنسبة والهجوم والتحرير والكسب التعويضي." },
+    limiter: { title: "محدد الصوت", description: "تحكم في القمم ووقت الاستباق وسقف الخرج." },
+    bassboost: { title: "تعزيز الجهير", description: "وزن الترددات المنخفضة والهارمونيك والعرض والمزج." },
+    autogain: { title: "كسب تلقائي / تطبيع", description: "الجهارة المستهدفة والحد الأقصى للكسب وسرعة الاستجابة." },
+    truepeak: { title: "محدد وعداد True Peak", description: "Oversampling والدفع والسقف وربط القنوات." },
+    peq: { title: "معادل بارامتري (PEQ)", description: "تحكم بستة نطاقات في التردد و Q والكسب." },
+    dynamiceq: { title: "معادل ديناميكي", description: "خفض أو رفع ترددات ديناميكي بتحكم العتبة." },
+    exciter: { title: "محسن الوضوح (Exciter)", description: "تحكم في الهارمونيك العليا ومزج اللمعان." },
+    deesser: { title: "مخفف الصفير", description: "تحكم في التردد والعتبة لتليين الصفير الحاد." },
+    noisegate: { title: "بوابة ضوضاء ذكية", description: "تقلل ضوضاء الخلفية بالعتبة والانتظار والتحرير." },
+    stereowidener: { title: "موسع ستيريو v2", description: "مستوى الوسط/الجوانب، باس مونو، وعرض الستيريو." },
+    echo: { title: "Echo (صدى)", description: "تحكم في التأخير والتغذية الراجعة والرطب/الجاف وقطع العالي." },
+    softecho: { title: "صدى ناعم", description: "إعدادات صدى محيطية أنعم." },
+    convreverb: { title: "صدى التفافي (IR)", description: "إحساس مكاني باستجابة نبضية، predelay ومزج." },
+    crossfeed: { title: "Crossfeed (سماعات)", description: "تسريب قنوات لمشهد ستيريو طبيعي أكثر في السماعات." },
+    surround: { title: "محيطي (5.1/7.1)", description: "إعدادات الوسط والمحيط و LFE والتقاطع والتأخير والمزج." },
+    bassmono: { title: "باس مونو", description: "يجعل الترددات المنخفضة في الوسط وينظف قاعدة الستيريو." },
+    tapesat: { title: "تشبع الشريط", description: "دفء شريط تناظري ودفع ونغمة وهسيس خفيف." },
+    bitdither: { title: "عمق البت / Dither", description: "عمق البت و dither وتشكيل الضوضاء وإعادة أخذ عينات بنمط قديم." },
+  },
+  "es-ES": {
+    audiophile: { title: "Salida de audio (audiófila)", description: "Controla el mezclador del sistema, dispositivo de salida, sample rate y preamp." },
+    eq32: { title: "Ecualizador profesional de 32 bandas", description: "Control preciso de frecuencia, ruedas de tono, anchura estéreo y balance." },
+    reverb: { title: "Reverb (BASS FX)", description: "Tamaño de sala, damping, mezcla wet/dry y ganancia de entrada." },
+    compressor: { title: "Compresor dinámico", description: "Threshold, ratio, attack, release, makeup gain y knee." },
+    limiter: { title: "Limitador", description: "Control de picos, lookahead y techo de salida." },
+    bassboost: { title: "Refuerzo de graves", description: "Peso de bajas frecuencias, armónicos, anchura y mezcla." },
+    autogain: { title: "Auto Gain / Normalize", description: "Loudness objetivo, ganancia máxima y velocidad de respuesta." },
+    truepeak: { title: "Limitador + medidor True Peak", description: "Oversampling, drive, ceiling y enlace de canales." },
+    peq: { title: "EQ paramétrico (PEQ)", description: "Control de frecuencia, Q y ganancia en seis bandas." },
+    dynamiceq: { title: "Dynamic EQ", description: "Reducción o aumento dinámico de frecuencia por umbral." },
+    exciter: { title: "Claridad (Exciter)", description: "Armónicos superiores y control de mezcla de brillo." },
+    deesser: { title: "De-esser", description: "Frecuencia y threshold para suavizar sibilancias duras." },
+    noisegate: { title: "Noise Gate inteligente", description: "Reduce ruido de fondo con threshold, hold y release." },
+    stereowidener: { title: "Stereo Widener v2", description: "Nivel centro/lados, bass mono y anchura estéreo." },
+    echo: { title: "Echo", description: "Control de delay, feedback, wet/dry y high-cut." },
+    softecho: { title: "Echo suave", description: "Ajustes de echo atmosférico más suave." },
+    convreverb: { title: "Reverb por convolución (IR)", description: "Espacio por respuesta impulsional, predelay y mezcla." },
+    crossfeed: { title: "Crossfeed (auriculares)", description: "Cruce de canales para una escena estéreo más natural en auriculares." },
+    surround: { title: "Surround (5.1/7.1)", description: "Ajustes de centro, surround, LFE, crossover, delay y mezcla." },
+    bassmono: { title: "Bass Mono", description: "Centra las frecuencias bajas y limpia la base estéreo." },
+    tapesat: { title: "Saturación de cinta", description: "Calidez de cinta analógica, drive, tono y hiss ligero." },
+    bitdither: { title: "Bit-depth / Dither", description: "Profundidad de bits, dither, noise shaping y remuestreo retro." },
+  },
+};
+
+const sfxParamTranslations: Record<AppLanguage, Record<string, string>> = {
+  "tr-TR": {
+    preamp: "Ana Kazanç",
+    outputDevice: "Çıkış Cihazı",
+    sampleRate: "Sample Rate",
+    acousticSpace: "Akustik Alan",
+    bass: "Bas (100 Hz)",
+    mid: "Mid (500 Hz-2 kHz)",
+    treble: "Tiz (10 kHz)",
+    stereoExpander: "Stereo",
+    balance: "Denge",
+    frequency: "Frekans",
+    gain: "Kazanç",
+    targetLevel: "Hedef",
+    maxGain: "Maks. Kazanç",
+    speed: "Hız",
+  },
+  "en-US": {
+    preamp: "Preamp",
+    outputDevice: "Output Device",
+    sampleRate: "Sample Rate",
+    acousticSpace: "Acoustic Space",
+    bass: "Bass (100 Hz)",
+    mid: "Mid (500 Hz-2 kHz)",
+    treble: "Treble (10 kHz)",
+    stereoExpander: "Stereo",
+    balance: "Balance",
+    frequency: "Frequency",
+    gain: "Gain",
+    targetLevel: "Target",
+    maxGain: "Max Gain",
+    speed: "Speed",
+  },
+  "ar-SA": {
+    preamp: "تضخيم مسبق",
+    outputDevice: "جهاز الخرج",
+    sampleRate: "معدل العينة",
+    acousticSpace: "المجال الصوتي",
+    bass: "الجهير (100 Hz)",
+    mid: "الوسط (500 Hz-2 kHz)",
+    treble: "الحدّة (10 kHz)",
+    stereoExpander: "ستيريو",
+    balance: "التوازن",
+    frequency: "التردد",
+    gain: "الكسب",
+    targetLevel: "الهدف",
+    maxGain: "أقصى كسب",
+    speed: "السرعة",
+  },
+  "es-ES": {
+    preamp: "Preamp",
+    outputDevice: "Dispositivo de salida",
+    sampleRate: "Sample Rate",
+    acousticSpace: "Espacio acústico",
+    bass: "Graves (100 Hz)",
+    mid: "Medios (500 Hz-2 kHz)",
+    treble: "Agudos (10 kHz)",
+    stereoExpander: "Estéreo",
+    balance: "Balance",
+    frequency: "Frecuencia",
+    gain: "Ganancia",
+    targetLevel: "Objetivo",
+    maxGain: "Ganancia máx.",
+    speed: "Velocidad",
+  },
+};
+
+function sfxEffectText(language: AppLanguage, id: SfxEffectId, fallback: SfxPanelDefinition | { label: string }) {
+  const translated = sfxEffectTranslations[language]?.[id] ?? sfxEffectTranslations["tr-TR"][id];
+  return translated ?? { title: "label" in fallback ? fallback.label : fallback.title, description: "description" in fallback ? fallback.description : "" };
+}
+
+function translateSfxParam(language: AppLanguage, param: SfxParam) {
+  const translated = sfxParamTranslations[language]?.[param.key] ?? sfxParamTranslations["tr-TR"][param.key] ?? param.label;
+  return { ...param, label: translated };
+}
 
 function SettingsWindow() {
   const [activeTab, setActiveTab] = useState<SettingsTabId>("web");
   const [draft, setDraft] = useState<WebSettings>(() => loadWebSettings());
   const [webClearStatus, setWebClearStatus] = useState("");
+  const text = (key: string) => tr(draft.language, key);
+
+  useEffect(() => {
+    applyDocumentTheme(resolveEffectiveTheme(draft), { persist: false });
+  }, [draft.theme, draft.followSystemTheme]);
 
   const updateDraft = <K extends keyof WebSettings>(key: K, value: WebSettings[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -1623,7 +3147,16 @@ function SettingsWindow() {
   };
 
   const saveAndClose = async () => {
+    const previousLanguage = loadWebSettings().language;
     saveWebSettings(draft);
+    if (previousLanguage !== draft.language) {
+      const shouldRestart = window.confirm(`${text("settings.behavior.restartTitle")}\n\n${text("settings.behavior.restartMessage")}`);
+      if (shouldRestart && isTauriRuntime()) {
+        await invoke("restart_app").catch((error) => reportClientError("app.restart", error));
+        if (import.meta.env.DEV) await closeWindow();
+        return;
+      }
+    }
     await closeWindow();
   };
 
@@ -1632,13 +3165,13 @@ function SettingsWindow() {
   };
 
   const clearWebDataNow = async (target: "cache" | "cookies" | "site-data" | "all", label: string) => {
-    setWebClearStatus(`${label} temizleniyor...`);
+    setWebClearStatus(formatLabel(text("settings.web.clearing"), { target: label }));
     try {
       await clearWebData(target);
-      setWebClearStatus(`${label} temizlendi.`);
+      setWebClearStatus(formatLabel(text("settings.web.cleared"), { target: label }));
     } catch (error) {
       reportClientError("web.clear-data", error);
-      setWebClearStatus(`${label} temizlenemedi.`);
+      setWebClearStatus(formatLabel(text("settings.web.clearFailed"), { target: label }));
     }
   };
 
@@ -1647,14 +3180,14 @@ function SettingsWindow() {
       <header className="settings-window-header" data-tauri-drag-region>
         <div className="settings-title">
           <SlidersHorizontal size={19} />
-          <span>Tercihler</span>
+          <span>{text("settings.title")}</span>
         </div>
-        <button className="settings-close-btn" onClick={() => void closeWindow()} title="Kapat" aria-label="Kapat">
+        <button className="settings-close-btn" onClick={() => void closeWindow()} title={text("common.close")} aria-label={text("common.close")}>
           <X size={18} />
         </button>
       </header>
 
-      <nav className="settings-tabs" aria-label="Ayar bölümleri">
+      <nav className="settings-tabs" aria-label={text("settings.aria")}>
         {settingsTabs.map((tab) => (
           <button
             className={`settings-tab ${activeTab === tab.id ? "active" : ""}`}
@@ -1662,7 +3195,7 @@ function SettingsWindow() {
             onClick={() => setActiveTab(tab.id)}
           >
             {tab.icon}
-            <span>{tab.label}</span>
+            <span>{text(tab.labelKey)}</span>
           </button>
         ))}
       </nav>
@@ -1670,19 +3203,19 @@ function SettingsWindow() {
       <section className="settings-content">
         {activeTab === "web" ? (
           <>
-            <h1>Web Ayarları</h1>
+            <h1>{text("settings.tabs.web")}</h1>
             <div className="settings-web-grid">
             <div className="settings-panel">
-              <h2>Genel</h2>
+              <h2>{text("settings.web.general")}</h2>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.enabled} onChange={(event) => updateDraft("enabled", event.target.checked)} />
-                <span>Web deneyimini etkinleştir</span>
+                <span>{text("settings.web.enable")}</span>
               </label>
 
               <div className="settings-row">
                 <div>
-                  <strong>Varsayılan platform</strong>
-                  <span>Web sekmesi ilk açıldığında seçilecek platform</span>
+                  <strong>{text("settings.web.defaultPlatform")}</strong>
+                  <span>{text("settings.web.defaultPlatformHint")}</span>
                 </div>
                 <select value={draft.defaultPlatformId} onChange={(event) => updateDraft("defaultPlatformId", event.target.value)}>
                   {platforms.map((platform) => (
@@ -1695,72 +3228,72 @@ function SettingsWindow() {
 
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.rememberLastPlatform} onChange={(event) => updateDraft("rememberLastPlatform", event.target.checked)} />
-                <span>Son kullanılan web platformunu hatırla</span>
+                <span>{text("settings.web.rememberPlatform")}</span>
               </label>
 
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.restoreLastSession} onChange={(event) => updateDraft("restoreLastSession", event.target.checked)} />
-                <span>Uygulama web sekmesinde kapandıysa aynı platformla aç</span>
+                <span>{text("settings.web.restoreSession")}</span>
               </label>
 
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.suspendWhenInactive} onChange={(event) => updateDraft("suspendWhenInactive", event.target.checked)} />
-                <span>Web sekmesi pasifken web oturumunu kapat</span>
+                <span>{text("settings.web.suspendInactive")}</span>
               </label>
 
               <div className="settings-row">
                 <div>
-                  <strong>Web başlangıç yükleme gecikmesi</strong>
-                  <span>Yavaş sistemlerde ilk WebView açılışını geciktirir</span>
+                  <strong>{text("settings.web.startupDelay")}</strong>
+                  <span>{text("settings.web.startupDelayHint")}</span>
                 </div>
                 <select value={draft.startupDelayMs} onChange={(event) => updateDraft("startupDelayMs", Number(event.target.value))}>
-                  <option value={0}>Anında (0 sn)</option>
-                  <option value={350}>Kısa (0.35 sn)</option>
-                  <option value={700}>Dengeli (0.7 sn)</option>
-                  <option value={1200}>Yavaş sistem (1.2 sn)</option>
+                  <option value={0}>{text("settings.web.delayInstant")}</option>
+                  <option value={350}>{text("settings.web.delayShort")}</option>
+                  <option value={700}>{text("settings.web.delayBalanced")}</option>
+                  <option value={1200}>{text("settings.web.delaySlow")}</option>
                 </select>
               </div>
             </div>
 
             <div className="settings-panel">
-              <h2>Görünüm ve Hareket</h2>
+              <h2>{text("settings.web.appearance")}</h2>
               <div className="settings-row">
                 <div>
-                  <strong>Web arayüz animasyonu</strong>
-                  <span>Üst ve yan barın web içeriğiyle davranış biçimi</span>
+                  <strong>{text("settings.web.animation")}</strong>
+                  <span>{text("settings.web.animationHint")}</span>
                 </div>
                 <select value={draft.animationMode} onChange={(event) => updateDraft("animationMode", event.target.value as WebSettings["animationMode"])}>
-                  <option value="compact">Kompakt</option>
-                  <option value="dock">Dock tarzı</option>
+                  <option value="compact">{text("settings.web.animationCompact")}</option>
+                  <option value="dock">{text("settings.web.animationDock")}</option>
                 </select>
               </div>
 
               <div className="settings-row">
                 <div>
-                  <strong>Web animasyon hızı</strong>
-                  <span>Bar gizleme/açılma hareketinin temposu</span>
+                  <strong>{text("settings.web.motion")}</strong>
+                  <span>{text("settings.web.motionHint")}</span>
                 </div>
                 <select value={draft.motionPreset} onChange={(event) => updateDraft("motionPreset", event.target.value as WebSettings["motionPreset"])}>
-                  <option value="calm">Sakin</option>
-                  <option value="balanced">Dengeli</option>
-                  <option value="fast">Hızlı</option>
+                  <option value="calm">{text("settings.web.motionCalm")}</option>
+                  <option value="balanced">{text("settings.web.motionBalanced")}</option>
+                  <option value="fast">{text("settings.web.motionFast")}</option>
                 </select>
               </div>
 
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.autoHideChrome} onChange={(event) => updateDraft("autoHideChrome", event.target.checked)} />
-                <span>İzleme sırasında üst ve yan barı otomatik gizle</span>
+                <span>{text("settings.web.autoHide")}</span>
               </label>
 
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.lowPowerMode} onChange={(event) => updateDraft("lowPowerMode", event.target.checked)} />
-                <span>Web animasyonları düşük sistem modu</span>
+                <span>{text("settings.web.lowPower")}</span>
               </label>
 
               <div className="settings-row">
                 <div>
-                  <strong>Otomatik gizleme süresi</strong>
-                  <span>Fare hareketi durduktan sonra bekleme süresi</span>
+                  <strong>{text("settings.web.autoHideDelay")}</strong>
+                  <span>{text("settings.web.autoHideDelayHint")}</span>
                 </div>
                 <div className="settings-number">
                   <input
@@ -1777,14 +3310,14 @@ function SettingsWindow() {
 
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.autoRecover} onChange={(event) => updateDraft("autoRecover", event.target.checked)} />
-                <span>Açılışta boş kalan web ekranını otomatik yeniden yükle</span>
+                <span>{text("settings.web.autoRecover")}</span>
               </label>
             </div>
 
             <div className="settings-panel">
-              <h2>Gizlilik ve Veri</h2>
+              <h2>{text("settings.web.privacy")}</h2>
               <div className="settings-info-row">
-                Kalıcı oturum açıkken web girişleri yerel profil klasöründe saklanır. Bu klasör yalnızca mevcut Linux kullanıcısına açık olacak şekilde korunur.
+                {text("settings.web.privacyInfo")}
               </div>
               <label className="settings-check-row">
                 <input
@@ -1799,7 +3332,7 @@ function SettingsWindow() {
                     }));
                   }}
                 />
-                <span>Kalıcı oturumları koru</span>
+                <span>{text("settings.web.persistent")}</span>
               </label>
               <label className="settings-check-row">
                 <input
@@ -1814,103 +3347,303 @@ function SettingsWindow() {
                     }));
                   }}
                 />
-                <span>Gizli web modu</span>
+                <span>{text("settings.web.private")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.clearCacheOnQuit} onChange={(event) => updateDraft("clearCacheOnQuit", event.target.checked)} />
-                <span>Uygulama kapanırken web önbelleğini temizle</span>
+                <span>{text("settings.web.clearCacheOnQuit")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.clearCookiesOnQuit} onChange={(event) => updateDraft("clearCookiesOnQuit", event.target.checked)} />
-                <span>Uygulama kapanırken web çerezlerini temizle</span>
+                <span>{text("settings.web.clearCookiesOnQuit")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.clearSiteDataOnQuit} onChange={(event) => updateDraft("clearSiteDataOnQuit", event.target.checked)} />
-                <span>Uygulama kapanırken site verilerini temizle</span>
+                <span>{text("settings.web.clearSiteDataOnQuit")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.preferHttps} onChange={(event) => updateDraft("preferHttps", event.target.checked)} />
-                <span>HTTP adreslerini mümkünse HTTPS olarak aç</span>
+                <span>{text("settings.web.preferHttps")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.reduceWebRtcIpLeaks} onChange={(event) => updateDraft("reduceWebRtcIpLeaks", event.target.checked)} />
-                <span>WebRTC IP sızıntılarını azalt</span>
+                <span>{text("settings.web.reduceWebRtc")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.stripTrackingParams} onChange={(event) => updateDraft("stripTrackingParams", event.target.checked)} />
-                <span>Bilinen takip parametrelerini temizle</span>
+                <span>{text("settings.web.stripTracking")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.blockThirdPartyCookies} onChange={(event) => updateDraft("blockThirdPartyCookies", event.target.checked)} />
-                <span>Üçüncü taraf çerezleri engelle</span>
+                <span>{text("settings.web.blockThirdParty")}</span>
               </label>
               <div className="settings-button-grid">
-                <button type="button" onClick={() => void clearWebDataNow("cache", "Önbellek")}>Önbelleği temizle</button>
-                <button type="button" onClick={() => void clearWebDataNow("cookies", "Çerezler")}>Çerezleri temizle</button>
-                <button type="button" onClick={() => void clearWebDataNow("site-data", "Site verileri")}>Site verilerini temizle</button>
-                <button type="button" onClick={() => void clearWebDataNow("all", "Tüm web verileri")}>Web oturumlarını temizle</button>
+                <button type="button" onClick={() => void clearWebDataNow("cache", text("settings.web.clearCache"))}>{text("settings.web.clearCache")}</button>
+                <button type="button" onClick={() => void clearWebDataNow("cookies", text("settings.web.clearCookies"))}>{text("settings.web.clearCookies")}</button>
+                <button type="button" onClick={() => void clearWebDataNow("site-data", text("settings.web.clearSiteData"))}>{text("settings.web.clearSiteData")}</button>
+                <button type="button" onClick={() => void clearWebDataNow("all", text("settings.web.clearAll"))}>{text("settings.web.clearAll")}</button>
               </div>
               {webClearStatus ? <div className="settings-status-row">{webClearStatus}</div> : null}
             </div>
 
             <div className="settings-panel">
-              <h2>İzinler ve Politika</h2>
+              <h2>{text("settings.web.permissions")}</h2>
               <div className="settings-row">
                 <div>
-                  <strong>Kullanıcı aracısı</strong>
-                  <span>Platformlara bildirilecek web görünümü tipi</span>
+                  <strong>{text("settings.web.userAgent")}</strong>
+                  <span>{text("settings.web.userAgentHint")}</span>
                 </div>
                 <select value={draft.userAgentMode} onChange={(event) => updateDraft("userAgentMode", event.target.value as WebSettings["userAgentMode"])}>
-                  <option value="desktop">Masaüstü</option>
-                  <option value="mobile">Mobil</option>
-                  <option value="default">Varsayılan</option>
+                  <option value="desktop">{text("settings.web.uaDesktop")}</option>
+                  <option value="mobile">{text("settings.web.uaMobile")}</option>
+                  <option value="default">{text("settings.web.uaDefault")}</option>
                 </select>
               </div>
               <div className="settings-row">
                 <div>
-                  <strong>Otomatik oynatma</strong>
-                  <span>Web sitelerinin medya başlatma davranışı</span>
+                  <strong>{text("settings.web.autoplay")}</strong>
+                  <span>{text("settings.web.autoplayHint")}</span>
                 </div>
                 <select value={draft.autoplayPolicy} onChange={(event) => updateDraft("autoplayPolicy", event.target.value as WebSettings["autoplayPolicy"])}>
-                  <option value="allow">İzin ver</option>
-                  <option value="gesture">Kullanıcı etkileşimi iste</option>
-                  <option value="block">Engelle</option>
+                  <option value="allow">{text("settings.web.autoplayAllow")}</option>
+                  <option value="gesture">{text("settings.web.autoplayGesture")}</option>
+                  <option value="block">{text("settings.web.autoplayBlock")}</option>
                 </select>
               </div>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.allowCamera} onChange={(event) => updateDraft("allowCamera", event.target.checked)} />
-                <span>Kamera iznine izin ver</span>
+                <span>{text("settings.web.allowCamera")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.allowMicrophone} onChange={(event) => updateDraft("allowMicrophone", event.target.checked)} />
-                <span>Mikrofon iznine izin ver</span>
+                <span>{text("settings.web.allowMicrophone")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.allowLocation} onChange={(event) => updateDraft("allowLocation", event.target.checked)} />
-                <span>Konum iznine izin ver</span>
+                <span>{text("settings.web.allowLocation")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.allowNotifications} onChange={(event) => updateDraft("allowNotifications", event.target.checked)} />
-                <span>Bildirim iznine izin ver</span>
+                <span>{text("settings.web.allowNotifications")}</span>
               </label>
               <label className="settings-check-row">
                 <input type="checkbox" checked={draft.allowPopups} onChange={(event) => updateDraft("allowPopups", event.target.checked)} />
-                <span>Pop-up pencerelerine izin ver</span>
+                <span>{text("settings.web.allowPopups")}</span>
               </label>
             </div>
             </div>
           </>
-        ) : (
+        ) : activeTab === "playback" ? (
+          <>
+            <h1>{text("settings.tabs.playback")}</h1>
+            <div className="settings-web-grid">
+              <div className="settings-panel">
+                <h2>{text("settings.playback.startupSection")}</h2>
+                <label className="settings-toggle-row">
+                  <input type="checkbox" checked={draft.playbackRestoreLastTrack} onChange={(event) => updateDraft("playbackRestoreLastTrack", event.target.checked)} />
+                  <span>
+                    <strong>{text("settings.playback.restoreLastTrack")}</strong>
+                    <small>{text("settings.playback.restoreLastTrackHint")}</small>
+                  </span>
+                </label>
+                <label className="settings-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={draft.playbackAutoplayLastTrack}
+                    disabled={!draft.playbackRestoreLastTrack}
+                    onChange={(event) => updateDraft("playbackAutoplayLastTrack", event.target.checked)}
+                  />
+                  <span>
+                    <strong>{text("settings.playback.autoplayLastTrack")}</strong>
+                    <small>{text("settings.playback.autoplayLastTrackHint")}</small>
+                  </span>
+                </label>
+                <label className="settings-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={draft.playbackResumePosition}
+                    disabled={!draft.playbackRestoreLastTrack}
+                    onChange={(event) => updateDraft("playbackResumePosition", event.target.checked)}
+                  />
+                  <span>
+                    <strong>{text("settings.playback.resumePosition")}</strong>
+                    <small>{text("settings.playback.resumePositionHint")}</small>
+                  </span>
+                </label>
+              </div>
+
+              <div className="settings-panel">
+                <h2>{text("settings.playback.transitionsSection")}</h2>
+                <label className="settings-toggle-row">
+                  <input type="checkbox" checked={draft.playbackFadeOnPause} onChange={(event) => updateDraft("playbackFadeOnPause", event.target.checked)} />
+                  <span>
+                    <strong>{text("settings.playback.fadeOnPause")}</strong>
+                    <small>{text("settings.playback.fadeOnPauseHint")}</small>
+                  </span>
+                </label>
+                <label className="settings-toggle-row">
+                  <input type="checkbox" checked={draft.playbackFadeOnStop} onChange={(event) => updateDraft("playbackFadeOnStop", event.target.checked)} />
+                  <span>
+                    <strong>{text("settings.playback.fadeOnStop")}</strong>
+                    <small>{text("settings.playback.fadeOnStopHint")}</small>
+                  </span>
+                </label>
+                <div className="settings-row">
+                  <div>
+                    <strong>{text("settings.playback.fadeDuration")}</strong>
+                    <span>{text("settings.playback.fadeDurationHint")}</span>
+                  </div>
+                  <input
+                    type="number"
+                    min={0}
+                    max={5000}
+                    step={100}
+                    value={draft.playbackFadeDurationMs}
+                    onChange={(event) => updateDraft("playbackFadeDurationMs", Number(event.target.value))}
+                  />
+                </div>
+                <label className="settings-toggle-row">
+                  <input type="checkbox" checked={draft.playbackCrossfadeManual} onChange={(event) => updateDraft("playbackCrossfadeManual", event.target.checked)} />
+                  <span>
+                    <strong>{text("settings.playback.crossfadeManual")}</strong>
+                    <small>{text("settings.playback.crossfadeManualHint")}</small>
+                  </span>
+                </label>
+                <label className="settings-toggle-row">
+                  <input type="checkbox" checked={draft.playbackCrossfadeAuto} onChange={(event) => updateDraft("playbackCrossfadeAuto", event.target.checked)} />
+                  <span>
+                    <strong>{text("settings.playback.crossfadeAuto")}</strong>
+                    <small>{text("settings.playback.crossfadeAutoHint")}</small>
+                  </span>
+                </label>
+                <div className="settings-row">
+                  <div>
+                    <strong>{text("settings.playback.crossfadeDuration")}</strong>
+                    <span>{text("settings.playback.crossfadeDurationHint")}</span>
+                  </div>
+                  <input
+                    type="number"
+                    min={0}
+                    max={15000}
+                    step={100}
+                    value={draft.playbackCrossfadeMs}
+                    onChange={(event) => updateDraft("playbackCrossfadeMs", Number(event.target.value))}
+                  />
+                </div>
+              </div>
+            </div>
+          </>
+        ) : activeTab === "keyboard" ? (
+          <>
+            <h1>{text("settings.tabs.keyboard")}</h1>
+            <div className="settings-shortcuts-grid">
+              {keyboardShortcutGroups.map((group) => (
+                <div className="settings-panel settings-shortcut-panel" key={group.titleKey}>
+                  <h2>{text(group.titleKey)}</h2>
+                  <div className="settings-shortcut-list">
+                    {group.items.map((item) => (
+                      <div className="settings-shortcut-row" key={item.labelKey}>
+                        <span className="settings-shortcut-label">
+                          <span className="settings-shortcut-icon">{item.icon}</span>
+                          <span>{text(item.labelKey)}</span>
+                        </span>
+                        <div>
+                          {item.keys.map((keyLabel) => (
+                            <kbd key={keyLabel}>{shortcutKeyLabel(draft.language, keyLabel)}</kbd>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : activeTab === "behavior" ? (
+          <>
+            <h1>{text("settings.tabs.behavior")}</h1>
+            <div className="settings-panel">
+              <h2>{text("settings.behavior.languageSection")}</h2>
+              <div className="settings-row">
+                <div>
+                  <strong>{text("settings.behavior.languageLabel")}</strong>
+                  <span>{text("settings.behavior.languageHint")}</span>
+                </div>
+                <select
+                  className="settings-language-select"
+                  value={draft.language}
+                  onChange={(event) => updateDraft("language", event.target.value as AppLanguage)}
+                >
+                  {appLanguages.map((language) => (
+                    <option key={language.id} value={language.id}>
+                      {language.emoji} {language.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="settings-panel">
+              <h2>{text("settings.behavior.appearanceSection")}</h2>
+              <div className="settings-row">
+                <div>
+                  <strong>{text("settings.behavior.themeLabel")}</strong>
+                  <span>{text("settings.behavior.themeHint")}</span>
+                </div>
+                <select value={draft.theme} onChange={(event) => updateDraft("theme", event.target.value as AppTheme)}>
+                  {appThemes.map((theme) => (
+                    <option key={theme.id} value={theme.id}>
+                      {text(theme.labelKey)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <label className="settings-toggle-row">
+                <input type="checkbox" checked={draft.followSystemTheme} onChange={(event) => updateDraft("followSystemTheme", event.target.checked)} />
+                <span>
+                  <strong>{text("settings.behavior.followSystemTheme")}</strong>
+                  <small>{text("settings.behavior.followSystemThemeHint")}</small>
+                </span>
+              </label>
+            </div>
+
+            <div className="settings-panel">
+              <h2>{text("settings.behavior.startupSection")}</h2>
+              <label className="settings-toggle-row">
+                <input type="checkbox" checked={draft.rememberLastSection} onChange={(event) => updateDraft("rememberLastSection", event.target.checked)} />
+                <span>
+                  <strong>{text("settings.behavior.rememberLastSection")}</strong>
+                  <small>{text("settings.behavior.rememberLastSectionHint")}</small>
+                </span>
+              </label>
+
+              <div className="settings-row">
+                <div>
+                  <strong>{text("settings.behavior.startupPageLabel")}</strong>
+                  <span>{text("settings.behavior.startupPageHint")}</span>
+                </div>
+                <select value={draft.startupPage} onChange={(event) => updateDraft("startupPage", event.target.value as StartupPage)}>
+                  {startupPages.map((startupPage) => (
+                    <option key={startupPage.id} value={startupPage.id}>
+                      {text(startupPage.labelKey)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </>
+          ) : (
           <div className="settings-empty-panel">
-            <h1>{settingsTabs.find((tab) => tab.id === activeTab)?.label}</h1>
+            <h1>{text(settingsTabs.find((tab) => tab.id === activeTab)?.labelKey ?? "settings.title")}</h1>
           </div>
         )}
       </section>
 
       <footer className="settings-footer">
-        <button className="settings-secondary-btn" onClick={() => void closeWindow()}>İptal</button>
-        <button className="settings-secondary-btn" onClick={resetDraft}>Varsayılana döndür</button>
-        <button className="settings-primary-btn" onClick={() => void saveAndClose()}>Kaydet</button>
+        <button className="settings-secondary-btn" onClick={() => void closeWindow()}>{text("common.cancel")}</button>
+        <button className="settings-secondary-btn" onClick={resetDraft}>{text("common.resetDefaults")}</button>
+        <button className="settings-primary-btn" onClick={() => void saveAndClose()}>{text("common.save")}</button>
       </footer>
     </main>
   );
@@ -2148,6 +3881,7 @@ export function App() {
   const tracksRef = useRef<Track[]>([]);
   const videosRef = useRef<VideoItem[]>([]);
   const stopAfterCurrentRef = useRef(false);
+  const startupPlaybackHandledRef = useRef(false);
 
   const [page, setPage] = useState<PageId>("music");
   const pageRef = useRef<PageId>("music");
@@ -2195,7 +3929,18 @@ export function App() {
   const webChromeBoundsTimerRef = useRef<number | null>(null);
   const webFullscreenRef = useRef(false);
   const windowFocusedRef = useRef(true);
+  const auxiliaryWindowFocusedRef = useRef(false);
   const lastAudibleVolumeRef = useRef(0.37);
+  const text = useCallback((key: string) => tr(webSettings.language, key), [webSettings.language]);
+
+  useEffect(() => {
+    document.documentElement.lang = webSettings.language;
+    document.documentElement.dir = "ltr";
+    applyDocumentTheme(resolveEffectiveTheme(webSettings));
+    if (isTauriRuntime()) {
+      void invoke("update_tray_language", { language: webSettings.language }).catch((error) => reportClientError("tray.language", error));
+    }
+  }, [webSettings.language, webSettings.theme, webSettings.followSystemTheme]);
 
   effectsEnabledRef.current = effectsEnabled;
   pageRef.current = page;
@@ -2450,8 +4195,12 @@ export function App() {
           .map((item, index) => videoFromPath(item.path, index, item.title, item.duration || 0, item.lastPosition || 0, item.coverDataUrl));
         const playback = snapshot.playback;
         const startupWebSettings = loadWebSettings();
-        const selectedMusicIndex = restoredTracks.findIndex((track) => track.path === playback?.selectedMusicPath);
-        const selectedVideoIndex = restoredVideos.findIndex((video) => video.path === playback?.selectedVideoPath);
+        const selectedMusicIndex = startupWebSettings.playbackRestoreLastTrack
+          ? restoredTracks.findIndex((track) => track.path === playback?.selectedMusicPath)
+          : 0;
+        const selectedVideoIndex = startupWebSettings.playbackRestoreLastTrack
+          ? restoredVideos.findIndex((video) => video.path === playback?.selectedVideoPath)
+          : 0;
 
         tracksRef.current = restoredTracks;
         videosRef.current = restoredVideos;
@@ -2468,10 +4217,13 @@ export function App() {
           lastWebPlatformIdRef.current = restoredWebPlatformId;
           setActiveWebPlatformId(restoredWebPlatformId);
         }
-        if (isPageId(playback?.currentPage)) {
-          const restoredPage = playback.currentPage === "web" && (!startupWebSettings.enabled || !startupWebSettings.restoreLastSession) ? "music" : playback.currentPage;
-          setPage(restoredPage);
-        }
+        const shouldRestoreLastSection = startupWebSettings.rememberLastSection && isPageId(playback?.currentPage);
+        const requestedPage: PageId = shouldRestoreLastSection ? playback.currentPage! : startupWebSettings.startupPage;
+        const restoredPage =
+          requestedPage === "web" && (!startupWebSettings.enabled || (shouldRestoreLastSection && !startupWebSettings.restoreLastSession))
+            ? "music"
+            : requestedPage;
+        setPage(restoredPage);
         setCurrentTime(0);
         setVideoCurrentTime(0);
         if (typeof playback?.volume === "number" && playback.volume >= 0 && playback.volume <= 1) setVolume(playback.volume);
@@ -3216,7 +4968,7 @@ export function App() {
   const openSoundEffectsWindow = useCallback(async () => {
     const scope = page === "video" ? "video" : page === "web" ? "web" : "music";
     const url = `/?view=sound-effects&scope=${scope}`;
-    const title = getSoundEffectsWindowTitle(scope);
+    const title = getSoundEffectsWindowTitle(scope, webSettings.language);
 
     if (!isTauriRuntime()) {
       window.open(url, "ardali-sound-effects", "width=1300,height=800");
@@ -3257,7 +5009,7 @@ export function App() {
     }
 
     try {
-      await invoke<string>("start_projectm_visualizer");
+      await invoke<string>("start_projectm_visualizer", { language: webSettings.language, theme: resolveEffectiveTheme(webSettings) });
       projectMActiveRef.current = true;
       setProjectMActive(true);
     } catch (error) {
@@ -3265,7 +5017,7 @@ export function App() {
       setProjectMActive(false);
       reportClientError("projectm.open", error);
     }
-  }, []);
+  }, [webSettings.language]);
 
   const openSettingsWindow = useCallback(async () => {
     const url = "/?view=settings";
@@ -3416,18 +5168,59 @@ export function App() {
   }, [dspSettings, effectsEnabled]);
 
   useEffect(() => {
-    if (!isPlaying || page === "video" || !isTauriRuntime() || !projectMActive) return undefined;
+    if ((!isPlaying && page !== "web") || page === "video" || !isTauriRuntime() || !projectMActive) return undefined;
 
     let cancelled = false;
     let frame = 0;
     let lastSent = 0;
+    let webPcmRequestInFlight = false;
 
     const sendFrame = () => {
       if (cancelled) return;
       const now = performance.now();
       if (now - lastSent >= 16) {
         lastSent = now;
-        if (nativeAudioMode && !htmlAudioFallbackActive) {
+        if (page === "web") {
+          if (webPcmRequestInFlight) {
+            frame = window.requestAnimationFrame(sendFrame);
+            return;
+          }
+          webPcmRequestInFlight = true;
+          void getWebDaliRawPcm(1024)
+            .then((pcmFrame) => {
+              if (!pcmFrame.length) return;
+              let peak = 0;
+              let sumSq = 0;
+              for (let index = 0; index < pcmFrame.length; index += 1) {
+                const value = Number(pcmFrame[index]) || 0;
+                peak = Math.max(peak, Math.abs(value));
+                sumSq += value * value;
+              }
+              const rms = Math.sqrt(sumSq / Math.max(1, pcmFrame.length));
+              const gain =
+                peak > 0
+                  ? Math.max(1, Math.min(8, Math.min(0.72 / Math.max(peak, 1e-6), 0.18 / Math.max(rms, 1e-6))))
+                  : 1;
+              const stereoSamples = new Array<number>(pcmFrame.length * 2);
+              for (let index = 0; index < pcmFrame.length; index += 1) {
+                const value = Math.tanh((Number(pcmFrame[index]) || 0) * gain);
+                stereoSamples[index * 2] = value;
+                stereoSamples[index * 2 + 1] = value;
+              }
+              const payload: ProjectMPcmPayload = {
+                channels: 2,
+                countPerChannel: pcmFrame.length,
+                samples: stereoSamples,
+              };
+              return invoke("feed_projectm_pcm", payload);
+            })
+            .catch((error) => {
+              reportClientError("projectm.web-pcm", error);
+            })
+            .finally(() => {
+              webPcmRequestInFlight = false;
+            });
+        } else if (nativeAudioMode && !htmlAudioFallbackActive) {
           void invoke("feed_projectm_native_audio", { countPerChannel: 1024 }).catch((error) => {
             reportClientError("projectm.native-pcm", error);
           });
@@ -3719,9 +5512,16 @@ export function App() {
   }, [webSettings.defaultPlatformId]);
 
   const handleInstallPlugin = useCallback((pluginId: string, installed: boolean) => {
-    setPluginInstalled(pluginId, installed);
-    setStoreStatus(installed ? "Eklenti kuruldu. Uyumlu platform açıldığında çalışacak." : "Eklenti kaldırıldı.");
-  }, []);
+    setStoreStatus(installed ? "Eklenti güvenlik doğrulamasından geçiriliyor..." : "Eklenti kaldırılıyor...");
+    void setPluginInstalled(pluginId, installed)
+      .then(() => {
+        setStoreStatus(installed ? "Eklenti kuruldu. Uyumlu platform açıldığında çalışacak." : "Eklenti kaldırıldı.");
+        void refreshStoreItems();
+      })
+      .catch((error) => {
+        setStoreStatus(`Eklenti kurulamadı: ${String(error)}`);
+      });
+  }, [refreshStoreItems]);
 
   const handleTogglePlugin = useCallback((pluginId: string, enabled: boolean) => {
     setPluginEnabled(pluginId, enabled);
@@ -3869,7 +5669,26 @@ export function App() {
     };
 
     const syncChromeWithFocus = () => {
-      applyHidden(webFullscreenRef.current || !windowFocusedRef.current);
+      applyHidden(webFullscreenRef.current || (!windowFocusedRef.current && !auxiliaryWindowFocusedRef.current));
+    };
+
+    const refreshAuxiliaryFocus = async () => {
+      const labels = ["sound-effects", "settings", "eq-presets"];
+      for (const label of labels) {
+        try {
+          const webview = await WebviewWindow.getByLabel(label);
+          if (webview && await webview.isFocused()) {
+            auxiliaryWindowFocusedRef.current = true;
+            syncChromeWithFocus();
+            return;
+          }
+        } catch {
+          // Ignore windows that are not open yet.
+        }
+      }
+
+      auxiliaryWindowFocusedRef.current = false;
+      syncChromeWithFocus();
     };
 
     windowFocusedRef.current = true;
@@ -3886,6 +5705,9 @@ export function App() {
     let unlisten: (() => void) | undefined;
     let unlistenFullscreen: (() => void) | undefined;
     let unlistenFocus: (() => void) | undefined;
+    const auxiliaryFocusPoll = window.setInterval(() => {
+      if (!windowFocusedRef.current) void refreshAuxiliaryFocus();
+    }, 350);
     void listen("webview-pointer-motion", revealChromeFromActivity).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -3899,7 +5721,12 @@ export function App() {
     });
     void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
       windowFocusedRef.current = focused;
-      syncChromeWithFocus();
+      if (focused) {
+        auxiliaryWindowFocusedRef.current = false;
+        syncChromeWithFocus();
+      } else {
+        window.setTimeout(() => void refreshAuxiliaryFocus(), 40);
+      }
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlistenFocus = cleanup;
@@ -3913,6 +5740,7 @@ export function App() {
       unlisten?.();
       unlistenFullscreen?.();
       unlistenFocus?.();
+      window.clearInterval(auxiliaryFocusPoll);
       window.removeEventListener("mousemove", revealChromeFromActivity);
       window.removeEventListener("keydown", revealChromeFromActivity);
       if (webChromeHideTimerRef.current !== null) {
@@ -3930,7 +5758,29 @@ export function App() {
     const current = getCurrentWindow();
     if (action === "minimize") await current.minimize();
     if (action === "maximize") await current.toggleMaximize();
-    if (action === "close") await current.close();
+    if (action === "close") await invoke("hide_main_window");
+  };
+
+  const stopMainWindowButtonDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+  };
+
+  const startMainWindowResize = async (direction: ResizeDirection) => {
+    if (!isTauriRuntime()) return;
+    try {
+      await getCurrentWindow().startResizeDragging(direction);
+    } catch (error) {
+      reportClientError("main-window.resize", error);
+    }
+  };
+
+  const handleMainResizeMouseDown = (
+    event: ReactMouseEvent<HTMLDivElement>,
+    direction: ResizeDirection,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void startMainWindowResize(direction);
   };
 
   const openMusicPicker = async () => {
@@ -4254,6 +6104,43 @@ export function App() {
     loadAndPlayTrack(index, { restorePosition: false, restartIfEnded: true });
   };
 
+  useEffect(() => {
+    if (!libraryLoaded || startupPlaybackHandledRef.current) return;
+    if (!webSettings.playbackRestoreLastTrack || !tracks.length) {
+      startupPlaybackHandledRef.current = true;
+      return;
+    }
+    const targetIndex = tracks[selectedTrack] ? selectedTrack : 0;
+    const targetTrack = tracks[targetIndex];
+    if (!targetTrack) {
+      startupPlaybackHandledRef.current = true;
+      return;
+    }
+    startupPlaybackHandledRef.current = true;
+    if (!webSettings.playbackAutoplayLastTrack) {
+      if (webSettings.playbackResumePosition && targetTrack.lastPosition > 0.2) {
+        setCurrentTime(targetTrack.lastPosition);
+        setDuration(targetTrack.duration || durationRef.current || 0);
+      }
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      loadAndPlayTrack(targetIndex, {
+        restorePosition: webSettings.playbackResumePosition,
+        restartIfEnded: true,
+      });
+    }, 260);
+    return () => window.clearTimeout(timer);
+  }, [
+    libraryLoaded,
+    loadAndPlayTrack,
+    selectedTrack,
+    tracks,
+    webSettings.playbackAutoplayLastTrack,
+    webSettings.playbackRestoreLastTrack,
+    webSettings.playbackResumePosition,
+  ]);
+
   const selectTrack = (index: number) => {
     switchPage("music");
     setSelectedTrack(index);
@@ -4316,10 +6203,19 @@ export function App() {
       }
       desiredPlaybackRef.current = false;
       pendingAudioPlayUrlRef.current = "";
-      void invoke("native_audio_pause").catch((error) => reportClientError("native.pause", error));
-      audioRef.current?.pause();
-      setIsAudioActuallyPlaying(false);
-      setIsPlaying(false);
+      const pauseNative = async () => {
+        try {
+          if (webSettings.playbackFadeOnPause) await fadeNativeVolume(0, webSettings.playbackFadeDurationMs);
+          await invoke("native_audio_pause");
+        } catch (error) {
+          reportClientError("native.pause", error);
+        } finally {
+          audioRef.current?.pause();
+          setIsAudioActuallyPlaying(false);
+          setIsPlaying(false);
+        }
+      };
+      void pauseNative();
       return;
     }
     const audio = audioRef.current;
@@ -4335,6 +6231,18 @@ export function App() {
     if (analysisGraphTimerRef.current !== null) {
       window.clearTimeout(analysisGraphTimerRef.current);
       analysisGraphTimerRef.current = null;
+    }
+    if (webSettings.playbackFadeOnPause) {
+      void fadeOutputGain(0, webSettings.playbackFadeDurationMs)
+        .then(() => {
+          audio.pause();
+          syncAudioVolume(volumeRef.current);
+        })
+        .finally(() => {
+          setIsAudioActuallyPlaying(false);
+          setIsPlaying(false);
+        });
+      return;
     }
     audio.pause();
     setIsAudioActuallyPlaying(false);
@@ -4353,19 +6261,28 @@ export function App() {
       !htmlAudioFallbackActiveRef.current &&
       canUseNativeAudioForTrack(currentTrack) &&
       canUseNativeAudioForTrack(nextTrack);
-    if (isPlaying && tracks.length > 1) {
+    if (isPlaying && tracks.length > 1 && webSettings.playbackCrossfadeManual && webSettings.playbackCrossfadeMs > 0) {
       if (nativeTrackTransition) {
         transitionRef.current = true;
-        loadAndPlayTrack(nextIndex, { restorePosition: false, restartIfEnded: true });
+        const fadeOutMs = Math.max(80, Math.round(webSettings.playbackCrossfadeMs * 0.42));
+        void fadeNativeVolume(0, fadeOutMs)
+          .then(() => {
+            loadAndPlayTrack(nextIndex, { restorePosition: false, restartIfEnded: true });
+          })
+          .finally(() => {
+            transitionRef.current = false;
+          });
         return;
       }
       transitionRef.current = true;
-      void fadeOutputGain(0, 650)
+      const fadeOutMs = Math.max(80, Math.round(webSettings.playbackCrossfadeMs * 0.42));
+      const fadeInMs = Math.max(80, Math.round(webSettings.playbackCrossfadeMs * 0.58));
+      void fadeOutputGain(0, fadeOutMs)
         .then(() => {
           loadAndPlayTrack(nextIndex, { restorePosition: false });
           return new Promise<void>((resolve) => window.setTimeout(resolve, 70));
         })
-        .then(() => fadeOutputGain(volumeRef.current, 900))
+        .then(() => fadeOutputGain(volumeRef.current, fadeInMs))
         .finally(() => {
           transitionRef.current = false;
           syncAudioVolume(volumeRef.current);
@@ -4376,16 +6293,17 @@ export function App() {
   };
 
   useEffect(() => {
-    if (page !== "music" || !isPlaying || tracks.length < 2 || transitionRef.current) return;
+    if (!webSettings.playbackCrossfadeAuto || page !== "music" || !isPlaying || tracks.length < 2 || transitionRef.current) return;
     if (!duration || duration < 8) return;
     const remaining = duration - currentTime;
     const key = selectedTrackData?.id || "";
+    const crossfadeSeconds = Math.max(0.2, webSettings.playbackCrossfadeMs / 1000);
     if (currentTime < 1) autoCrossfadeKeyRef.current = "";
-    if (remaining > 0.2 && remaining <= 2.1 && autoCrossfadeKeyRef.current !== key) {
+    if (remaining > 0.2 && remaining <= crossfadeSeconds + 0.1 && autoCrossfadeKeyRef.current !== key) {
       autoCrossfadeKeyRef.current = key;
       goToTrack(1);
     }
-  }, [currentTime, duration, isPlaying, page, selectedTrackData?.id, tracks.length]);
+  }, [currentTime, duration, isPlaying, page, selectedTrackData?.id, tracks.length, webSettings.playbackCrossfadeAuto, webSettings.playbackCrossfadeMs]);
 
   useEffect(() => {
     if (!nativeAudioMode || htmlAudioFallbackActive || page !== "music" || !isPlaying) return undefined;
@@ -4632,6 +6550,98 @@ export function App() {
   handleSeekRef.current = handleSeek;
   seekByRef.current = seekBy;
   isPlayingRef.current = isAudioActuallyPlaying;
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (shouldIgnoreKeyboardShortcut(event)) return;
+      const ctrlOrMeta = event.ctrlKey || event.metaKey;
+
+      if (event.code === "Space" || event.code === "MediaPlayPause") {
+        event.preventDefault();
+        togglePlayback();
+        return;
+      }
+      if (event.code === "MediaTrackPrevious") {
+        event.preventDefault();
+        goToTrack(-1);
+        return;
+      }
+      if (event.code === "MediaTrackNext") {
+        event.preventDefault();
+        goToTrack(1);
+        return;
+      }
+      if (event.code === "ArrowLeft") {
+        event.preventDefault();
+        if (ctrlOrMeta) goToTrack(-1);
+        else seekBy(-5);
+        return;
+      }
+      if (event.code === "ArrowRight") {
+        event.preventDefault();
+        if (ctrlOrMeta) goToTrack(1);
+        else seekBy(5);
+        return;
+      }
+      if (!ctrlOrMeta && event.code === "KeyM") {
+        event.preventDefault();
+        toggleMute();
+        return;
+      }
+      if (!ctrlOrMeta && event.code === "Digit1") {
+        event.preventDefault();
+        switchPage("music");
+        return;
+      }
+      if (!ctrlOrMeta && event.code === "Digit2") {
+        event.preventDefault();
+        switchPage("video");
+        return;
+      }
+      if (!ctrlOrMeta && event.code === "Digit3") {
+        event.preventDefault();
+        switchPage("gallery");
+        return;
+      }
+      if (!ctrlOrMeta && event.code === "Digit4") {
+        event.preventDefault();
+        switchPage("web");
+        return;
+      }
+      if (ctrlOrMeta && event.code === "Comma") {
+        event.preventDefault();
+        void openSettingsWindow();
+        return;
+      }
+      if (!ctrlOrMeta && event.code === "KeyE") {
+        event.preventDefault();
+        void openSoundEffectsWindow();
+        return;
+      }
+      if (!ctrlOrMeta && event.code === "KeyV") {
+        event.preventDefault();
+        void openProjectMWindow();
+        return;
+      }
+      if (!ctrlOrMeta && event.code === "KeyF") {
+        event.preventDefault();
+        if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+        else void document.documentElement.requestFullscreen?.().catch(() => undefined);
+      }
+    };
+
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [
+    goToTrack,
+    openProjectMWindow,
+    openSettingsWindow,
+    openSoundEffectsWindow,
+    seekBy,
+    switchPage,
+    toggleMute,
+    togglePlayback,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5152,15 +7162,24 @@ export function App() {
       />
 
       <header className="window-titlebar" data-tauri-drag-region>
-        <span data-tauri-drag-region>ArDali WebMedia</span>
+        <span data-tauri-drag-region>{text("app.title")}</span>
         <div className="window-controls">
-          <button onClick={() => void handleMainWindowAction("minimize")} title="Kucult" aria-label="Kucult">-</button>
-          <button onClick={() => void handleMainWindowAction("maximize")} title="Buyut" aria-label="Buyut">⌃</button>
-          <button onClick={() => void handleMainWindowAction("close")} title="Kapat" aria-label="Kapat">×</button>
+          <button onPointerDown={stopMainWindowButtonDrag} onClick={() => void handleMainWindowAction("minimize")} title={text("window.minimize")} aria-label={text("window.minimize")}>-</button>
+          <button onPointerDown={stopMainWindowButtonDrag} onClick={() => void handleMainWindowAction("maximize")} title={text("window.maximize")} aria-label={text("window.maximize")}>⌃</button>
+          <button onPointerDown={stopMainWindowButtonDrag} onClick={() => void handleMainWindowAction("close")} title={text("common.close")} aria-label={text("common.close")}>×</button>
         </div>
       </header>
+      <div className="main-window-resize-grip main-window-resize-n" onMouseDown={(event) => handleMainResizeMouseDown(event, "North")} />
+      <div className="main-window-resize-grip main-window-resize-e" onMouseDown={(event) => handleMainResizeMouseDown(event, "East")} />
+      <div className="main-window-resize-grip main-window-resize-s" onMouseDown={(event) => handleMainResizeMouseDown(event, "South")} />
+      <div className="main-window-resize-grip main-window-resize-w" onMouseDown={(event) => handleMainResizeMouseDown(event, "West")} />
+      <div className="main-window-resize-grip main-window-resize-ne" onMouseDown={(event) => handleMainResizeMouseDown(event, "NorthEast")} />
+      <div className="main-window-resize-grip main-window-resize-nw" onMouseDown={(event) => handleMainResizeMouseDown(event, "NorthWest")} />
+      <div className="main-window-resize-grip main-window-resize-se" onMouseDown={(event) => handleMainResizeMouseDown(event, "SouthEast")} />
+      <div className="main-window-resize-grip main-window-resize-sw" onMouseDown={(event) => handleMainResizeMouseDown(event, "SouthWest")} />
+      <div className="main-window-resize-cue" aria-hidden="true" />
 
-      <nav className="rail" aria-label="Ana sekmeler">
+      <nav className="rail" aria-label={text("settings.aria")}>
         <div className="rail-stack">
           {railItems.map((item) => {
             if (item.id === "web" && !webSettings.enabled) return null;
@@ -5176,28 +7195,24 @@ export function App() {
                       ? "gallery.svg"
                       : item.id === "web"
                         ? "web.svg"
-                        : item.id === "listen"
-                          ? "pulse.svg"
-                          : item.id === "downloads"
-                            ? "download.png"
-                            : "";
+                        : "";
             return (
               <button
                 className={`rail-btn ${active ? "active" : ""}`}
                 data-page={item.id}
                 key={item.id}
                 onClick={() => switchPage(item.id)}
-                title={item.label}
-                aria-label={item.label}
+                title={text(item.labelKey)}
+                aria-label={text(item.labelKey)}
               >
                 {iconName ? <RailThemeIcon name={iconName} /> : <Settings size={26} strokeWidth={2.1} />}
               </button>
             );
           })}
-          <button className="rail-btn utility" data-page="sound-effects" onClick={openSoundEffectsWindow} title="Ses Efektleri" aria-label="Ses Efektleri">
+          <button className="rail-btn utility" data-page="sound-effects" onClick={openSoundEffectsWindow} title={text("rail.soundEffects")} aria-label={text("rail.soundEffects")}>
             <RailThemeIcon name="sound-effects.svg" />
           </button>
-          <button className="rail-btn utility" data-page="visualizer" onClick={openProjectMWindow} title="Gorsellestirme" aria-label="Gorsellestirme">
+          <button className="rail-btn utility" data-page="visualizer" onClick={openProjectMWindow} title={text("rail.visualizer")} aria-label={text("rail.visualizer")}>
             <RailThemeIcon name="visualizer.svg" />
           </button>
         </div>
@@ -5205,12 +7220,12 @@ export function App() {
           className="rail-btn"
           data-page="settings"
           onClick={() => void openSettingsWindow()}
-          title="Ayarlar"
-          aria-label="Ayarlar"
+          title={text("rail.settings")}
+          aria-label={text("rail.settings")}
         >
           <Settings size={26} strokeWidth={2.1} />
         </button>
-        <button className="rail-btn muted" title="Hakkinda" aria-label="Hakkinda">
+        <button className="rail-btn muted" title={text("rail.about")} aria-label={text("rail.about")}>
           <CircleHelp size={24} />
         </button>
       </nav>
@@ -5218,67 +7233,73 @@ export function App() {
       {page !== "web" ? (
       <aside className="library-panel">
         <div className="panel-header">
-          <span>KUTUPHANE</span>
+          <span>{text("library.title")}</span>
           <button
             className="library-collapse-btn"
             onClick={() => setRailCollapsed((value) => !value)}
-            title={railCollapsed ? "Sekmeler seridini ac" : "Sekmeler seridini gizle"}
-            aria-label={railCollapsed ? "Sekmeler seridini ac" : "Sekmeler seridini gizle"}
+            title={railCollapsed ? text("library.collapseOpen") : text("library.collapseHide")}
+            aria-label={railCollapsed ? text("library.collapseOpen") : text("library.collapseHide")}
             aria-expanded={!railCollapsed}
           >
             {railCollapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
           </button>
         </div>
         <div className="library-panel-content">
-          <div className="panel-actions">
+          <div className="library-quick-add">
             {page === "video" ? (
               <button className="primary-library-btn" onClick={openVideoPicker}>
-                <Video size={28} />
-                <strong>Video Ac</strong>
-                <span>{videoItems.length ? `${videoItems.length} video hazir` : "Yerel video dosyasi sec"}</span>
+                <span className="library-add-icon"><Video size={22} /></span>
+                <span>
+                  <strong>{text("library.openVideo")}</strong>
+                  <small>{videoItems.length ? formatLabel(text("library.videoReady"), { count: videoItems.length }) : text("library.pickVideo")}</small>
+                </span>
               </button>
             ) : (
               <button className="primary-library-btn" onClick={openMusicPicker}>
-                <FolderPlus size={28} />
-                <strong>Kutuphaneye ekle</strong>
-                <span>{tracks.length ? `${tracks.length} sarki hazir` : "Kok kutuphane"}</span>
+                <span className="library-add-icon"><FolderPlus size={22} /></span>
+                <span>
+                  <strong>{text("library.addMusic")}</strong>
+                  <small>{tracks.length ? formatLabel(text("library.musicReady"), { count: tracks.length }) : text("library.root")}</small>
+                </span>
               </button>
             )}
           </div>
-          <div className="library-tabs">
-            <button className="active" title="Koleksiyon" aria-label="Koleksiyon">
+          <div className="library-summary" aria-label={text("library.collection")}>
+            <div className="library-stat active" title={text("library.collection")}>
               <Album size={17} />
               <span>{page === "video" ? videoItems.length : tracks.length}</span>
-            </button>
-            <button title="Simdi calan" aria-label="Simdi calan">
+            </div>
+            <div className="library-stat" title={text("library.nowPlaying")}>
               <Play size={17} />
               <span>{page === "video" ? (selectedVideoData ? 1 : 0) : selectedTrackData ? 1 : 0}</span>
-            </button>
-            <button title="Kuyruk" aria-label="Kuyruk">
+            </div>
+            <div className="library-stat" title={text("library.queue")}>
               <ListMusic size={17} />
               <span>{Math.max(0, (page === "video" ? videoItems.length : tracks.length) - 1)}</span>
-            </button>
+            </div>
           </div>
           <label className="search-box">
             <Search size={16} />
             <input
               value={libraryQuery}
               onChange={(event) => setLibraryQuery(event.target.value)}
-              placeholder="Kutuphanede ara..."
+              placeholder={text("library.search")}
             />
           </label>
           <div className="saved-folders">
-            <span className="section-label">KAYITLI KLASORLER</span>
+            <span className="section-label">{text("library.savedFolders")}</span>
             <button className="folder-row active">
               <span className="folder-dot" />
-              {page === "video" ? "Yerel Video" : "Yerel Muzik"}
+              {page === "video" ? text("library.localVideo") : text("library.localMusic")}
             </button>
             <button className="folder-row">
               <span className="folder-dot cyan" />
-              Gosterilen: {visibleLibraryCount}
+              {formatLabel(text("library.shown"), { count: visibleLibraryCount })}
             </button>
+          </div>
+          <div className="library-maintenance">
             <button className="library-maintenance-btn" onClick={cleanMissingLibraryItems} disabled={!isTauriRuntime()}>
-              Eksik dosyalari temizle
+              {text("library.cleanMissing")}
             </button>
           </div>
         </div>
@@ -5294,16 +7315,16 @@ export function App() {
                   <button
                     className="web-history-btn"
                     onClick={() => void navigateWebHistory("back").catch((error) => reportClientError("web.history-back", error))}
-                    title="Geri"
-                    aria-label="Geri"
+                    title={text("nav.back")}
+                    aria-label={text("nav.back")}
                   >
                     <ChevronLeft size={20} />
                   </button>
                   <button
                     className="web-history-btn"
                     onClick={() => void navigateWebHistory("forward").catch((error) => reportClientError("web.history-forward", error))}
-                    title="İleri"
-                    aria-label="İleri"
+                    title={text("nav.forward")}
+                    aria-label={text("nav.forward")}
                   >
                     <ChevronRight size={20} />
                   </button>
@@ -5341,20 +7362,20 @@ export function App() {
               }
               switchPage(page === "video" ? "files" : "music");
             }}
-            title="Kutuphanede geri"
-            aria-label="Kutuphanede geri"
+            title={text("nav.back")}
+            aria-label={text("nav.back")}
           >
             <ChevronLeft size={20} />
           </button>
           <button
             className="nav-btn"
             onClick={() => switchPage(page === "files" ? "music" : page)}
-            title="Kutuphanede ileri"
-            aria-label="Kutuphanede ileri"
+            title={text("nav.forward")}
+            aria-label={text("nav.forward")}
           >
             <ChevronRight size={20} />
           </button>
-          <button className="nav-btn" title="Yenile" aria-label="Yenile">
+          <button className="nav-btn" title={text("nav.refresh")} aria-label={text("nav.refresh")}>
             <RefreshCw size={18} />
           </button>
           {page === "music" ? (
@@ -5362,14 +7383,14 @@ export function App() {
               <button
                 className={`nav-btn ${musicViewMenuOpen ? "active" : ""}`}
                 onClick={() => setMusicViewMenuOpen((value) => !value)}
-                title="Gorunum ayarlari"
-                aria-label="Gorunum ayarlari"
+                title={text("nav.viewSettings")}
+                aria-label={text("nav.viewSettings")}
                 aria-expanded={musicViewMenuOpen}
               >
                 <SlidersHorizontal size={18} />
               </button>
               {musicViewMenuOpen ? (
-                <div className="view-popover" role="menu" aria-label="Muzik gorunum ayarlari">
+                <div className="view-popover" role="menu" aria-label={text("nav.musicViewSettings")}>
                   {musicViewModes.map((mode) => (
                     <button
                       className={musicViewMode === mode.id ? "active" : ""}
@@ -5382,7 +7403,7 @@ export function App() {
                       aria-checked={musicViewMode === mode.id}
                     >
                       {mode.id === "cards" ? <Grid2X2 size={17} /> : <ListMusic size={17} />}
-                      <span>{mode.label}</span>
+                      <span>{text(`nav.${mode.id}`)}</span>
                       {musicViewMode === mode.id ? <Check size={16} /> : null}
                     </button>
                   ))}
@@ -5391,15 +7412,15 @@ export function App() {
             </div>
           ) : (
             <div className="view-switch">
-              <button className="active" title="Liste" aria-label="Liste">
+              <button className="active" title={text("nav.list")} aria-label={text("nav.list")}>
                 <ListMusic size={17} />
               </button>
-              <button title="Kart" aria-label="Kart">
+              <button title={text("nav.card")} aria-label={text("nav.card")}>
                 <Grid2X2 size={17} />
               </button>
             </div>
           )}
-          <div className="now-playing">Su An Calinan: {nowPlaying}</div>
+          <div className="now-playing">{formatLabel(text("nav.nowPlaying"), { name: nowPlaying })}</div>
           </>
           )}
         </div>
@@ -5448,6 +7469,7 @@ export function App() {
                 onLoadedData={handleVideoLoadedData}
                 onRemove={removeVideo}
                 onSelect={playVideo}
+                text={text}
                 onTimeUpdate={handleVideoTimeUpdate}
                 onPlayState={setIsVideoPlaying}
                 onEnded={() => goToVideo(1)}
@@ -5468,6 +7490,7 @@ export function App() {
                 onPlay={playTrack}
                 onRemove={removeTrack}
                 onSelect={selectTrack}
+                text={text}
               />
             )}
           </div>
@@ -5497,6 +7520,7 @@ export function App() {
           onSeekBy={seekBy}
           onToggleMute={toggleMute}
           onVolume={setVolume}
+          text={text}
         />
         </>
         )}
@@ -5508,6 +7532,7 @@ export function App() {
 function SoundEffectsWindow() {
   const scope = normalizeSfxScope(new URLSearchParams(window.location.search).get("scope") || "music");
   const initial = useMemo(() => loadSoundEffectsState(scope), [scope]);
+  const [webSettings, setWebSettings] = useState<WebSettings>(() => loadWebSettings());
   const [masterEnabled, setMasterEnabled] = useState(initial.masterEnabled);
   const [currentEffect, setCurrentEffect] = useState<SfxEffectId>(initial.currentEffect);
   const [panels, setPanels] = useState<Record<SfxEffectId, SfxPanelDefinition>>(initial.panels);
@@ -5541,6 +7566,10 @@ function SoundEffectsWindow() {
     },
   });
   const activePanel = panels[currentEffect];
+  const language = webSettings.language;
+  const text = useCallback((key: string) => tr(language, key), [language]);
+  const activePanelText = sfxEffectText(language, currentEffect, activePanel);
+  const windowTitle = getSoundEffectsWindowTitle(scope, language);
   const spectrumActive = currentEffect === "eq32" || currentEffect === "truepeak";
   const animationsActive = windowVisible && lightsMode !== "off";
   const broadcastState = useMemo(
@@ -5552,6 +7581,31 @@ function SoundEffectsWindow() {
     }),
     [masterEnabled, panels, scope, sfxBroadcast],
   );
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+    document.documentElement.dir = "ltr";
+    document.title = windowTitle;
+    applyDocumentTheme(resolveEffectiveTheme(webSettings));
+  }, [language, webSettings.theme, webSettings.followSystemTheme, windowTitle]);
+
+  useEffect(() => {
+    const handleLocalSettings = (event: Event) => {
+      const detail = (event as CustomEvent<WebSettings>).detail;
+      setWebSettings(detail ?? loadWebSettings());
+    };
+    let cleanupTauri: (() => void) | undefined;
+    if (isTauriRuntime()) {
+      void listen<WebSettings>(WEB_SETTINGS_EVENT, (event) => setWebSettings(event.payload)).then((cleanup) => {
+        cleanupTauri = cleanup;
+      });
+    }
+    window.addEventListener(WEB_SETTINGS_EVENT, handleLocalSettings);
+    return () => {
+      cleanupTauri?.();
+      window.removeEventListener(WEB_SETTINGS_EVENT, handleLocalSettings);
+    };
+  }, []);
 
   useEffect(() => {
     const syncVisibility = () => setWindowVisible(!document.hidden);
@@ -5579,8 +7633,13 @@ function SoundEffectsWindow() {
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        const values = await invoke<NativeSpectrumPair>("native_audio_spectrum_pair", { bands: 96 });
-        if (!cancelled && values && Array.isArray(values.processed) && Array.isArray(values.raw)) setSfxSpectrum(values);
+        if (scope === "web") {
+          const raw = await getWebDaliRawSpectrum(96);
+          if (!cancelled) setSfxSpectrum({ processed: raw, raw });
+        } else {
+          const values = await invoke<NativeSpectrumPair>("native_audio_spectrum_pair", { bands: 96 });
+          if (!cancelled && values && Array.isArray(values.processed) && Array.isArray(values.raw)) setSfxSpectrum(values);
+        }
       } catch {
         if (!cancelled) setSfxSpectrum({ processed: [], raw: [] });
       } finally {
@@ -5593,7 +7652,7 @@ function SoundEffectsWindow() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [spectrumActive]);
+  }, [scope, spectrumActive]);
 
   useEffect(() => {
     localStorage.setItem(soundEffectsCrossfeedAutoKey, crossfeedAutoHeadphones ? "1" : "0");
@@ -5838,7 +7897,7 @@ function SoundEffectsWindow() {
 
   const openEqPresetsWindow = async () => {
     const url = "/?view=eq-presets";
-    const title = "ArDali Hazir Ayarlar - ArDali Medya Player";
+    const title = `${text("sfx.presets")} - ArDali`;
     if (!isTauriRuntime()) {
       window.open(url, "ardali-eq-presets", "width=980,height=820");
       return;
@@ -5866,11 +7925,11 @@ function SoundEffectsWindow() {
   return (
     <main className={`sfx-window sfx-light-${lightsMode}`} data-sfx-lights={lightsMode}>
       <header className="sfx-titlebar" data-tauri-drag-region>
-        <span data-tauri-drag-region>{getSoundEffectsWindowTitle(scope)}</span>
+        <span data-tauri-drag-region>{windowTitle}</span>
         <div className="window-controls">
-          <button onClick={() => void windowAction("minimize")} aria-label="Kucult">-</button>
-          <button onClick={() => void windowAction("maximize")} aria-label="Buyut">⌃</button>
-          <button onClick={() => void windowAction("close")} aria-label="Kapat">×</button>
+          <button onClick={() => void windowAction("minimize")} aria-label={text("window.minimize")}>-</button>
+          <button onClick={() => void windowAction("maximize")} aria-label={text("window.maximize")}>⌃</button>
+          <button onClick={() => void windowAction("close")} aria-label={text("common.close")}>×</button>
         </div>
       </header>
       <header className="sfx-window-header">
@@ -5879,24 +7938,30 @@ function SoundEffectsWindow() {
           <label className="sfx-master-toggle">
             <input checked={masterEnabled} onChange={() => setMasterEnabled((value) => !value)} type="checkbox" />
             <span />
-            <strong>Ses Efektlerini Etkinlestir</strong>
+            <strong>{text("sfx.enableEffects")}</strong>
           </label>
           <label className="sfx-light-control">
-            <span>Isik Rengi</span>
+            <span>{text("sfx.lightColor")}</span>
             <select value={lightsMode} onChange={(event) => setLightsMode(event.target.value)}>
-              <option value="cyan">Gok Mavi</option>
-              <option value="rainbow">Rainbow</option>
-              <option value="blue">Mavi</option>
-              <option value="purple">Mor</option>
-              <option value="green">Yesil</option>
-              <option value="amber">Amber</option>
-              <option value="red">Kirmizi</option>
-              <option value="off">Kapali</option>
+              <option value="cyan">{text("sfx.light.cyan")}</option>
+              <option value="rainbow">{text("sfx.light.rainbow")}</option>
+              <option value="blue">{text("sfx.light.blue")}</option>
+              <option value="purple">{text("sfx.light.purple")}</option>
+              <option value="green">{text("sfx.light.green")}</option>
+              <option value="amber">{text("sfx.light.amber")}</option>
+              <option value="red">{text("sfx.light.red")}</option>
+              <option value="off">{text("sfx.light.off")}</option>
             </select>
           </label>
         </div>
         <div className="sfx-header-right">
-          <span className="sfx-status">DSP: {masterEnabled ? "Acik" : "Kapali"} • Scope: {scope} • Aktif: {activePanel.title}</span>
+          <span className="sfx-status">
+            {formatLabel(text("sfx.status"), {
+              state: masterEnabled ? text("sfx.on") : text("sfx.off"),
+              scope: text(`sfx.scope.${scope}`),
+              active: activePanelText.title,
+            })}
+          </span>
         </div>
       </header>
 
@@ -5911,7 +7976,7 @@ function SoundEffectsWindow() {
                   onClick={() => setCurrentEffect(item.id)}
                 >
                   <SfxEffectIcon id={item.id} />
-                  <span>{item.label}</span>
+                  <span>{sfxEffectText(language, item.id, item).title}</span>
                 </button>
               ))}
             </div>
@@ -5921,23 +7986,23 @@ function SoundEffectsWindow() {
         <section className="sfx-panel-full">
           <div className="sfx-panel-head">
             <div>
-              <h1>{activePanel.title}</h1>
-              <p>{activePanel.description}</p>
+              <h1>{activePanelText.title}</h1>
+              <p>{activePanelText.description}</p>
             </div>
             <div className="sfx-panel-actions">
               {typeof activePanel.enabled === "boolean" ? (
                 <label className="sfx-enable">
                   <input checked={activePanel.enabled} onChange={() => togglePanel(currentEffect)} type="checkbox" />
-                  <span>Etkin</span>
+                  <span>{text("sfx.enabled")}</span>
                 </label>
               ) : null}
               {currentEffect === "eq32" ? (
                 <button className="sfx-preset-btn" onClick={() => void openEqPresetsWindow()}>
-                  Hazir Ayarlar • {broadcastState.eqPresetLabel || eqPresets[broadcastState.eqPreset]?.label || "Duz (Flat)"}
+                  {text("sfx.presets")} • {broadcastState.eqPresetLabel || eqPresets[broadcastState.eqPreset]?.label || "Duz (Flat)"}
                 </button>
               ) : null}
               <button className="sfx-reset-btn" onClick={() => resetPanel(currentEffect)}>
-                Sifirla
+                {text("sfx.reset")}
               </button>
             </div>
           </div>
@@ -5960,6 +8025,8 @@ function SoundEffectsWindow() {
                 onParamChange={(key, value) => updatePanelParam("eq32", key, value)}
                 onOptionChange={(key, value) => updatePanelOption("eq32", key, value)}
                 onReset={resetEqModule}
+                language={language}
+                text={text}
               />
             </>
           ) : (
@@ -5971,6 +8038,7 @@ function SoundEffectsWindow() {
                   outputState={crossfeedOutput}
                   panel={activePanel}
                   onAutoChange={setCrossfeedAutoHeadphones}
+                  text={text}
                 />
               ) : null}
               {currentEffect === "truepeak" ? (
@@ -5979,15 +8047,16 @@ function SoundEffectsWindow() {
                   spectrum={sfxSpectrum}
                   onOptionChange={(key, value) => updatePanelOption("truepeak", key, value)}
                   onParamChange={(key, value) => updatePanelParam("truepeak", key, value)}
+                  text={text}
                 />
               ) : null}
-              {currentEffect === "bassmono" ? <SfxBassMonoVisual panel={activePanel} /> : null}
+              {currentEffect === "bassmono" ? <SfxBassMonoVisual panel={activePanel} text={text} /> : null}
               <div className="sfx-knob-grid">
                 {activePanel.params.map((param) => (
                   <SfxKnob
                     key={param.key}
                     lightsMode={lightsMode}
-                    param={param}
+                    param={translateSfxParam(language, param)}
                     active={animationsActive}
                     onChange={(value) => updatePanelParam(currentEffect, param.key, value)}
                   />
@@ -6000,7 +8069,7 @@ function SoundEffectsWindow() {
             <div className="sfx-option-grid">
               {activePanel.options.map((option) => (
                 <label className="sfx-option" key={option.key}>
-                  <span>{option.label}</span>
+                  <span>{sfxParamTranslations[language]?.[option.key] ?? sfxParamTranslations["tr-TR"][option.key] ?? option.label}</span>
                   <select value={option.value} onChange={(event) => updatePanelOption(currentEffect, option.key, event.target.value)}>
                     {option.options.map((value) => (
                       <option key={value} value={value}>
@@ -6015,7 +8084,7 @@ function SoundEffectsWindow() {
 
           {currentEffect !== "eq32" && sfxPanelPresets[currentEffect]?.length ? (
             <section className="sfx-presets-section">
-              <div className="sfx-presets-title">Hazir Ayarlar</div>
+              <div className="sfx-presets-title">{text("sfx.presets")}</div>
               <div className="sfx-presets-buttons">
                 {sfxPanelPresets[currentEffect]?.map((preset) => (
                   <button
@@ -6034,12 +8103,12 @@ function SoundEffectsWindow() {
       </div>
 
       <footer className="sfx-window-footer">ArDali DSP Engine v3.0 • 48kHz / 32-bit Float Processing</footer>
-      <button className="sfx-resize-grip" onMouseDown={() => void startWindowResize()} aria-label="Pencereyi yeniden boyutlandir" />
+      <button className="sfx-resize-grip" onMouseDown={() => void startWindowResize()} aria-label={text("sfx.resize")} />
     </main>
   );
 }
 
-function SfxBassMonoVisual({ panel }: { panel: SfxPanelDefinition }) {
+function SfxBassMonoVisual({ panel, text }: { panel: SfxPanelDefinition; text: (key: string) => string }) {
   const cutoff = getPanelParam(panel, "cutoff");
   const slope = getPanelParam(panel, "slope");
   const stereoWidth = getPanelParam(panel, "stereoWidth");
@@ -6072,7 +8141,7 @@ function SfxBassMonoVisual({ panel }: { panel: SfxPanelDefinition }) {
         <strong>Bass Mono</strong>
         <div>
           <span>Cutoff {Math.round(cutoff)} Hz</span>
-          <span>Eğim {Math.round(slope)} dB/oct</span>
+          <span>{text("sfx.slope")} {Math.round(slope)} dB/oct</span>
           <span>Stereo Width {Math.round(stereoWidth)}%</span>
         </div>
       </div>
@@ -6103,7 +8172,7 @@ function SfxBassMonoVisual({ panel }: { panel: SfxPanelDefinition }) {
         ))}
       </svg>
       <div className="sfx-bassmono-note">
-        Cutoff altındaki frekanslar mono merkeze toplanır; üst bant stereo genişliğini korur veya Stereo Width ile genişler.
+        {text("sfx.bassMonoNote")}
       </div>
     </section>
   );
@@ -6114,11 +8183,13 @@ function SfxTruePeakMeter({
   spectrum,
   onParamChange,
   onOptionChange,
+  text,
 }: {
   panel: SfxPanelDefinition;
   spectrum: NativeSpectrumPair;
   onParamChange: (key: string, value: number) => void;
   onOptionChange: (key: string, value: string) => void;
+  text: (key: string) => string;
 }) {
   const ceiling = getPanelParam(panel, "ceiling");
   const drive = getPanelParam(panel, "drive");
@@ -6150,7 +8221,7 @@ function SfxTruePeakMeter({
 
   return (
     <section className="sfx-truepeak-meter">
-      <div className="sfx-truepeak-title">Stereo True Peak Meters</div>
+      <div className="sfx-truepeak-title">{text("sfx.truePeakMeters")}</div>
       {(["L", "R"] as const).map((channel, index) => {
         const db = channel === "L" ? meterL : meterR;
         return (
@@ -6173,9 +8244,9 @@ function SfxTruePeakMeter({
       </div>
       <div className="sfx-truepeak-statusline">
         <div>
-          <span>Clipping:</span>
+          <span>{text("sfx.clipping")}</span>
           <strong>{clipCount}</strong>
-          <button onClick={() => setClipCount(0)}>Sifirla</button>
+          <button onClick={() => setClipCount(0)}>{text("sfx.reset")}</button>
         </div>
         <div>
           <span>GR:</span>
@@ -6184,7 +8255,7 @@ function SfxTruePeakMeter({
       </div>
       <div className="sfx-truepeak-controls">
         <div className="sfx-truepeak-os">
-          <span>Oversampling:</span>
+          <span>{text("sfx.oversampling")}</span>
           {oversamplingValues.map((value) => (
             <button className={Math.round(oversampling) === value ? "active" : ""} key={value} onClick={() => onParamChange("oversampling", value)}>
               {value}x
@@ -6193,11 +8264,13 @@ function SfxTruePeakMeter({
         </div>
         <label className="sfx-truepeak-link">
           <input checked={stereoLink} onChange={(event) => onOptionChange("stereoLink", event.target.checked ? "on" : "off")} type="checkbox" />
-          <span>Stereo Link</span>
+          <span>{text("sfx.stereoLink")}</span>
         </label>
       </div>
       <div className="sfx-truepeak-help">
-        {active ? `Limiter aktif: Clipping ${clipCount}, anlik GR ${displayGr.toFixed(1)} dB.` : "Limiter kapali: meter ve clipping sayaci beklemede."}
+        {active
+          ? formatLabel(text("sfx.truePeakActive"), { clip: clipCount, gr: displayGr.toFixed(1) })
+          : text("sfx.truePeakIdle")}
       </div>
     </section>
   );
@@ -6209,30 +8282,35 @@ function SfxCrossfeedAssist({
   outputState,
   panel,
   onAutoChange,
+  text,
 }: {
   autoHeadphones: boolean;
   dspState: NativeAudioState | null;
   outputState: NativeAudioOutputState;
   panel: SfxPanelDefinition;
   onAutoChange: (value: boolean) => void;
+  text: (key: string) => string;
 }) {
   const level = getPanelParam(panel, "level");
   const delay = getPanelParam(panel, "delay");
   const lowCut = getPanelParam(panel, "lowCut");
   const highCut = getPanelParam(panel, "highCut");
-  const statusText = `DSP Durumu: ${dspState?.initialized ? "Bagli" : "Bekliyor"} | Loaded: ${dspState?.loaded ? "1" : "0"}`;
+  const statusText = formatLabel(text("sfx.dspStatus"), {
+    state: dspState?.initialized ? text("sfx.connected") : text("sfx.waiting"),
+    loaded: dspState?.loaded ? "1" : "0",
+  });
   const outputClass = outputState.success && outputState.isHeadphones ? "headphones" : outputState.success ? "speakers" : "unknown";
   const outputText =
     outputState.success && outputState.isHeadphones
-      ? `${outputState.currentOutputName} kulaklik olarak algilandi. Crossfeed kullanimi uygundur.`
+      ? formatLabel(text("sfx.headphonesDetected"), { device: outputState.currentOutputName })
       : outputState.success
-        ? `${outputState.currentOutputName} hoparlor/line cikisi olarak algilandi. Crossfeed genelde gerekli degildir.`
-        : "Cikis bilgisi okunamadi. Crossfeed manuel modda kalir.";
+        ? formatLabel(text("sfx.speakersDetected"), { device: outputState.currentOutputName })
+        : text("sfx.outputUnknown");
 
   return (
     <section className="sfx-crossfeed-assist">
       <div className="sfx-crossfeed-visual">
-        <h3>Stereo Alan Simulasyonu</h3>
+        <h3>{text("sfx.stereoField")}</h3>
         <svg viewBox="0 0 420 210" aria-hidden="true">
           <circle className="head" cx="210" cy="116" r="45" />
           <circle className="speaker speaker-left" cx="110" cy="42" r="8" />
@@ -6255,10 +8333,10 @@ function SfxCrossfeedAssist({
       <div className={`sfx-crossfeed-device ${outputClass}`}>{outputText}</div>
       <label className="sfx-crossfeed-auto">
         <input checked={autoHeadphones} onChange={(event) => onAutoChange(event.target.checked)} type="checkbox" />
-        <span>Kulaklik baglantisina gore crossfeed'i otomatik ac/kapat</span>
+        <span>{text("sfx.crossfeedAuto")}</span>
       </label>
       <div className="sfx-crossfeed-details">
-        Low Cut {Math.round(lowCut)} Hz • High Cut {Math.round(highCut)} Hz
+        {formatLabel(text("sfx.lowHighCut"), { low: Math.round(lowCut), high: Math.round(highCut) })}
       </div>
     </section>
   );
@@ -6683,6 +8761,8 @@ function SfxEqModule({
   onParamChange,
   onOptionChange,
   onReset,
+  language,
+  text,
 }: {
   active: boolean;
   params: SfxParam[];
@@ -6691,6 +8771,8 @@ function SfxEqModule({
   onParamChange: (key: string, value: number) => void;
   onOptionChange: (key: string, value: string) => void;
   onReset: () => void;
+  language: AppLanguage;
+  text: (key: string) => string;
 }) {
   const moduleParams = ["bass", "mid", "treble", "stereoExpander"]
     .map((key) => params.find((param) => param.key === key))
@@ -6699,14 +8781,14 @@ function SfxEqModule({
   return (
     <section className="sfx-module-row">
       <div className="sfx-module-card sfx-module-main">
-        <div className="sfx-module-title">ArDali Modulu</div>
+        <div className="sfx-module-title">{text("sfx.module")}</div>
         <div className="sfx-module-knobs">
           {moduleParams.map((param) => (
             <SfxKnob
               active={active}
               key={param.key}
               lightsMode={lightsMode}
-              param={param}
+              param={translateSfxParam(language, param)}
               onChange={(value) => onParamChange(param.key, value)}
             />
           ))}
@@ -6714,7 +8796,7 @@ function SfxEqModule({
         <div className="sfx-module-bottom">
           {options.map((option) => (
             <label className="sfx-acoustic-select" key={option.key}>
-              <span>{option.label}</span>
+              <span>{sfxParamTranslations[language]?.[option.key] ?? sfxParamTranslations["tr-TR"][option.key] ?? option.label}</span>
               <select value={option.value} onChange={(event) => onOptionChange(option.key, event.target.value)}>
                 {option.options.map((value) => (
                   <option key={value} value={value}>
@@ -6724,12 +8806,12 @@ function SfxEqModule({
               </select>
             </label>
           ))}
-          <button className="sfx-module-reset" onClick={onReset}>Modulu Sifirla</button>
+          <button className="sfx-module-reset" onClick={onReset}>{text("sfx.resetModule")}</button>
         </div>
       </div>
       {balance ? (
         <div className="sfx-module-card sfx-balance-card">
-          <div className="sfx-module-title">Denge (Sol ↔ Sag)</div>
+          <div className="sfx-module-title">{text("sfx.balance")}</div>
           <div className="sfx-balance-readout">
             <button onClick={() => onParamChange("balance", -100)}>L</button>
             <strong>{getBalanceText(balance.value)}</strong>
@@ -6749,7 +8831,7 @@ function SfxEqModule({
             type="range"
             value={balance.value}
           />
-          <button className="sfx-balance-center" onClick={() => onParamChange("balance", 0)}>Merkez</button>
+          <button className="sfx-balance-center" onClick={() => onParamChange("balance", 0)}>{text("sfx.center")}</button>
         </div>
       ) : null}
     </section>
@@ -7057,6 +9139,13 @@ const eqGroupLabels: Array<[string, string]> = [
   ["other", "Diger"],
 ];
 
+const eqGroupTranslations: Record<AppLanguage, Record<string, string>> = {
+  "tr-TR": { all: "Tümü", bass: "Bas", treble: "Tiz", vocal: "Vokal", jazz: "Caz", classical: "Klasik", electronic: "Elektronik", pop: "Pop", rock: "Rock", vshape: "V-Shape", flat: "Düz", other: "Diğer" },
+  "en-US": { all: "All", bass: "Bass", treble: "Treble", vocal: "Vocal", jazz: "Jazz", classical: "Classical", electronic: "Electronic", pop: "Pop", rock: "Rock", vshape: "V-Shape", flat: "Flat", other: "Other" },
+  "ar-SA": { all: "الكل", bass: "جهير", treble: "حاد", vocal: "صوت", jazz: "جاز", classical: "كلاسيكي", electronic: "إلكتروني", pop: "بوب", rock: "روك", vshape: "V-Shape", flat: "مسطح", other: "أخرى" },
+  "es-ES": { all: "Todo", bass: "Graves", treble: "Agudos", vocal: "Vocal", jazz: "Jazz", classical: "Clásica", electronic: "Electrónica", pop: "Pop", rock: "Rock", vshape: "V-Shape", flat: "Plano", other: "Otro" },
+};
+
 type EqPreviewProfile = "quality" | "balanced" | "performance";
 
 function clampEqBand(value: number) {
@@ -7300,6 +9389,7 @@ function EqPresetCurve({
 }
 
 function EqPresetsWindow() {
+  const [webSettings, setWebSettings] = useState<WebSettings>(() => loadWebSettings());
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("all");
   const [previewProfile, setPreviewProfile] = useState<EqPreviewProfile>("balanced");
@@ -7309,6 +9399,33 @@ function EqPresetsWindow() {
   const [renderLimit, setRenderLimit] = useState(80);
   const confirmedRef = useRef(false);
   const originalBroadcastRef = useRef<SfxBroadcastState>(normalizeSfxBroadcast(loadSoundEffectsState().broadcast));
+  const language = webSettings.language;
+  const text = useCallback((key: string) => tr(language, key), [language]);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+    document.documentElement.dir = "ltr";
+    document.title = text("eqPresets.windowTitle");
+    applyDocumentTheme(resolveEffectiveTheme(webSettings));
+  }, [language, text, webSettings.theme, webSettings.followSystemTheme]);
+
+  useEffect(() => {
+    const handleLocalSettings = (event: Event) => {
+      const detail = (event as CustomEvent<WebSettings>).detail;
+      setWebSettings(detail ?? loadWebSettings());
+    };
+    let cleanupTauri: (() => void) | undefined;
+    if (isTauriRuntime()) {
+      void listen<WebSettings>(WEB_SETTINGS_EVENT, (event) => setWebSettings(event.payload)).then((cleanup) => {
+        cleanupTauri = cleanup;
+      });
+    }
+    window.addEventListener(WEB_SETTINGS_EVENT, handleLocalSettings);
+    return () => {
+      cleanupTauri?.();
+      window.removeEventListener(WEB_SETTINGS_EVENT, handleLocalSettings);
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -7320,12 +9437,12 @@ function EqPresetsWindow() {
       })
       .catch((error: unknown) => {
         if (!alive) return;
-        setLoadError(error instanceof Error ? error.message : "Hazir ayarlar yuklenemedi");
+        setLoadError(error instanceof Error ? error.message : text("eqPresets.loadError"));
       });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [text]);
 
   const visiblePresets = useMemo(() => presets.filter((preset) => {
     const normalizedQuery = query.toLocaleLowerCase("tr");
@@ -7338,13 +9455,13 @@ function EqPresetsWindow() {
   }), [group, presets, query]);
   const renderedPresets = visiblePresets.slice(0, renderLimit);
   const selectedPreset = presets.find((preset) => preset.id === selected) ?? visiblePresets[0] ?? presets[0];
-  const groupLabel = eqGroupLabels.find(([id]) => id === group)?.[1] ?? group;
+  const groupLabel = eqGroupTranslations[language]?.[group] ?? eqGroupTranslations["tr-TR"][group] ?? group;
   const profileHint =
     previewProfile === "quality"
-      ? "Tam mod: tum animasyon ve gorsel efektler aktif."
+      ? text("eqPresets.hintQuality")
       : previewProfile === "performance"
-        ? "Minimum mod: en hafif gorunum, animasyon ve efektler minimumdadir."
-        : "Dengeli mod: animasyonlar sadelesir, performans daha stabildir.";
+        ? text("eqPresets.hintPerformance")
+        : text("eqPresets.hintBalanced");
 
   useEffect(() => {
     setRenderLimit(80);
@@ -7432,26 +9549,26 @@ function EqPresetsWindow() {
   return (
     <main className="eq-preset-window">
       <header className="eq-preset-titlebar" data-tauri-drag-region>
-        <span data-tauri-drag-region>ArDali Hazir Ayarlar - ArDali Medya Player</span>
+        <span data-tauri-drag-region>{text("eqPresets.windowTitle")}</span>
         <div className="window-controls">
-          <button onClick={() => void windowAction("minimize")} aria-label="Kucult">-</button>
-          <button onClick={() => void windowAction("maximize")} aria-label="Buyut">⌃</button>
-          <button onClick={() => void windowAction("close")} aria-label="Kapat">×</button>
+          <button onClick={() => void windowAction("minimize")} aria-label={text("window.minimize")}>-</button>
+          <button onClick={() => void windowAction("maximize")} aria-label={text("window.maximize")}>⌃</button>
+          <button onClick={() => void windowAction("close")} aria-label={text("common.close")}>×</button>
         </div>
       </header>
       <header className="eq-preset-heading">
-        <h1>Hazir Ayarlar</h1>
+        <h1>{text("eqPresets.title")}</h1>
       </header>
       <label className="eq-preset-search">
         <Search size={18} />
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Hazir ayar ara..." />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text("eqPresets.search")} />
       </label>
       <div className="eq-preset-toolbar">
-        <div className="eq-profile-row" role="group" aria-label="Gorunum modu">
+        <div className="eq-profile-row" role="group" aria-label={text("eqPresets.viewMode")}>
           {[
-            ["quality", "Tam"],
-            ["balanced", "Dengeli"],
-            ["performance", "Minimum"],
+            ["quality", text("eqPresets.quality")],
+            ["balanced", text("eqPresets.balanced")],
+            ["performance", text("eqPresets.performance")],
           ].map(([id, label]) => (
             <button className={previewProfile === id ? "active" : ""} key={id} onClick={() => setPreviewProfile(id as EqPreviewProfile)}>
               {label}
@@ -7459,11 +9576,11 @@ function EqPresetsWindow() {
           ))}
         </div>
         <label className="eq-group-select">
-          <span>Kategori</span>
+          <span>{text("eqPresets.category")}</span>
           <select value={group} onChange={(event) => setGroup(event.target.value)}>
             {eqGroupLabels.map(([id, label]) => (
               <option key={id} value={id}>
-                {label}
+                {eqGroupTranslations[language]?.[id] ?? eqGroupTranslations["tr-TR"][id] ?? label}
               </option>
             ))}
           </select>
@@ -7471,7 +9588,7 @@ function EqPresetsWindow() {
       </div>
       <div className="eq-profile-hint">{profileHint}</div>
       <div className="eq-preset-status">
-        {loadError ? loadError : `Gosterilen: ${visiblePresets.length} / ${presets.length} • Grup: ${groupLabel}`}
+        {loadError ? loadError : formatLabel(text("eqPresets.shown"), { visible: visiblePresets.length, total: presets.length, group: groupLabel })}
       </div>
       <section className="eq-preset-list" onScroll={handlePresetScroll}>
         {renderedPresets.map((preset) => (
@@ -7492,7 +9609,7 @@ function EqPresetsWindow() {
         ))}
       </section>
       <footer>
-        <button onClick={applySelected}>Tamam</button>
+        <button onClick={applySelected}>{language === "ar-SA" ? "تم" : language === "en-US" ? "Done" : language === "es-ES" ? "Listo" : "Tamam"}</button>
       </footer>
     </main>
   );
@@ -7612,7 +9729,8 @@ function ProjectMWindow() {
     }
     setNativeStatus("Native ProjectM baslatiliyor...");
     try {
-      const message = await invoke<string>("start_projectm_visualizer");
+      const settings = loadWebSettings();
+      const message = await invoke<string>("start_projectm_visualizer", { language: settings.language, theme: resolveEffectiveTheme(settings) });
       setNativeStatus(message);
     } catch (error) {
       setNativeStatus(String(error));
@@ -7689,6 +9807,7 @@ const MusicPage = memo(function MusicPage({
   onPlay,
   onRemove,
   onSelect,
+  text,
 }: {
   tracks: Track[];
   query: string;
@@ -7699,14 +9818,15 @@ const MusicPage = memo(function MusicPage({
   onPlay: (index: number) => void;
   onRemove: (index: number) => void;
   onSelect: (index: number) => void;
+  text: (key: string) => string;
 }) {
   if (!tracks.length) {
     return (
       <div className="music-page empty-music-page">
         <button className="empty-library-card" onClick={onAdd}>
           <FolderPlus size={46} />
-          <strong>Muzik kutuphanesi bos</strong>
-          <span>MP3, FLAC, WAV, OGG, M4A veya OPUS dosyalarini ekleyin.</span>
+          <strong>{text("music.emptyTitle")}</strong>
+          <span>{text("music.emptyHint")}</span>
         </button>
         <div className="visualizer-strip idle" aria-hidden="true">
           {Array.from({ length: 78 }, (_, index) => (
@@ -7726,8 +9846,8 @@ const MusicPage = memo(function MusicPage({
       <div className="music-page empty-music-page">
         <div className="empty-library-card passive">
           <Search size={46} />
-          <strong>Sonuc bulunamadi</strong>
-          <span>Arama filtresini degistirerek kutuphanede tekrar deneyin.</span>
+          <strong>{text("music.noResultsTitle")}</strong>
+          <span>{text("music.noResultsHint")}</span>
         </div>
         <div className="visualizer-strip idle" aria-hidden="true">
           {Array.from({ length: 78 }, (_, index) => (
@@ -7777,14 +9897,14 @@ const MusicPage = memo(function MusicPage({
                 {track.artist} • {track.fileName}
               </small>
             </span>
-            <span className="track-tag">{selected === index ? "Caliniyor" : track.tag}</span>
+            <span className="track-tag">{selected === index ? text("music.playing") : track.tag}</span>
             <span className="track-length">{track.length}</span>
             <span
               className="item-remove-btn"
               role="button"
               tabIndex={0}
-              title="Kutuphaneden kaldir"
-              aria-label="Kutuphaneden kaldir"
+              title={text("common.removeFromLibrary")}
+              aria-label={text("common.removeFromLibrary")}
               onClick={(event) => {
                 event.stopPropagation();
                 onRemove(index);
@@ -7846,6 +9966,7 @@ function VideoPage({
   onSeek,
   onSeekBy,
   onVolume,
+  text,
 }: {
   videos: VideoItem[];
   query: string;
@@ -7873,6 +9994,7 @@ function VideoPage({
   onSeek: (value: number) => void;
   onSeekBy: (seconds: number) => void;
   onVolume: (value: number) => void;
+  text: (key: string) => string;
 }) {
   const [fsSettingsOpen, setFsSettingsOpen] = useState(false);
   const [fsSettingsView, setFsSettingsView] = useState<"main" | "quality">("main");
@@ -7918,8 +10040,8 @@ function VideoPage({
       <div className="video-page empty-video-page">
         <button className="empty-library-card" onClick={onAdd}>
           <Video size={46} />
-          <strong>Video kutuphanesi bos</strong>
-          <span>MP4, MKV, WebM, MOV veya AVI dosyalarini ekleyin.</span>
+          <strong>{text("video.emptyTitle")}</strong>
+          <span>{text("video.emptyHint")}</span>
         </button>
       </div>
     );
@@ -7949,8 +10071,8 @@ function VideoPage({
       <div className="video-page empty-video-page">
         <div className="empty-library-card passive">
           <Search size={46} />
-          <strong>Sonuc bulunamadi</strong>
-          <span>Arama filtresini degistirerek video kutuphanesinde tekrar deneyin.</span>
+          <strong>{text("music.noResultsTitle")}</strong>
+          <span>{text("video.noResultsHint")}</span>
         </div>
       </div>
     );
@@ -7963,15 +10085,15 @@ function VideoPage({
   const speedOptions = [0.5, 0.75, 1, 1.25, 1.5, 2];
   const fpsOptions = [0, 24, 30, 60];
   const qualityOptions: Array<{ id: VideoQuality; label: string }> = [
-    { id: "auto", label: "Otomatik" },
+    { id: "auto", label: text("video.auto") },
     { id: "1080p", label: "1080p" },
     { id: "720p", label: "720p" },
     { id: "480p", label: "480p" },
     { id: "360p", label: "360p" },
   ];
   const sourceHeight = videoRef.current?.videoHeight || 0;
-  const autoQualityLabel = sourceHeight > 0 ? `${sourceHeight}p` : "Otomatik";
-  const selectedQualityMenuLabel = videoQuality === "auto" ? `Otomatik${sourceHeight > 0 ? ` (${autoQualityLabel})` : ""}` : videoQuality;
+  const autoQualityLabel = sourceHeight > 0 ? `${sourceHeight}p` : text("video.auto");
+  const selectedQualityMenuLabel = videoQuality === "auto" ? `${text("video.auto")}${sourceHeight > 0 ? ` (${autoQualityLabel})` : ""}` : videoQuality;
   const cyclePlaybackSpeed = () => {
     const video = videoRef.current;
     const canvas = speedFrameCanvasRef.current;
@@ -8100,8 +10222,8 @@ function VideoPage({
               className="item-remove-btn video-remove-btn"
               role="button"
               tabIndex={0}
-              title="Kutuphaneden kaldir"
-              aria-label="Kutuphaneden kaldir"
+              title={text("common.removeFromLibrary")}
+              aria-label={text("common.removeFromLibrary")}
               onClick={(event) => {
                 event.stopPropagation();
                 onRemove(index);
@@ -8123,7 +10245,7 @@ function VideoPage({
         <div className="video-player-top">
           <button className="inline-btn" onClick={onDock}>
             <ChevronLeft size={17} />
-            Geri
+            {text("video.back")}
           </button>
           <div>
             <strong>{selectedVideo?.title}</strong>
@@ -8131,7 +10253,7 @@ function VideoPage({
           </div>
           <button className="inline-btn" onClick={toggleVideoFullscreen}>
             <Maximize2 size={17} />
-            Tam Ekran
+            {text("video.fullscreen")}
           </button>
         </div>
         <div
@@ -8142,7 +10264,7 @@ function VideoPage({
         >
           {videoElement}
           <canvas ref={speedFrameCanvasRef} className={`video-rate-frame ${speedFrameVisible ? "visible" : ""}`} aria-hidden="true" />
-          <button className={`video-fs-center-play ${fsControlsVisible || fsSettingsOpen ? "" : "hidden"}`} onClick={() => onPlayState(!isPlaying)} aria-label="Oynat / Duraklat">
+          <button className={`video-fs-center-play ${fsControlsVisible || fsSettingsOpen ? "" : "hidden"}`} onClick={() => onPlayState(!isPlaying)} aria-label={text("player.playPause")}>
             {isPlaying ? <Pause size={44} fill="currentColor" /> : <Play size={44} fill="currentColor" />}
           </button>
           {wheelHud ? (
@@ -8163,30 +10285,30 @@ function VideoPage({
             </div>
           ) : null}
           {!isPlaying ? (
-            <button className="video-center-play" onClick={() => onPlayState(true)} aria-label="Videoyu oynat">
+            <button className="video-center-play" onClick={() => onPlayState(true)} aria-label={text("video.play")}>
               <Play size={54} fill="currentColor" />
             </button>
           ) : null}
           <div className="video-mini-overlay" onClick={(event) => event.stopPropagation()}>
             <div className="video-mini-overlay-top">
-              <button className="video-mini-overlay-btn" onClick={onUndock} title="Calisma alanina al" aria-label="Calisma alanina al">
+              <button className="video-mini-overlay-btn" onClick={onUndock} title={text("video.restore")} aria-label={text("video.restore")}>
                 <Maximize2 size={18} />
               </button>
-              <button className="video-mini-overlay-btn" onClick={onCloseMini} title="Mini oynaticiyi kapat" aria-label="Mini oynaticiyi kapat">
+              <button className="video-mini-overlay-btn" onClick={onCloseMini} title={text("video.closeMini")} aria-label={text("video.closeMini")}>
                 <X size={18} />
               </button>
             </div>
-            <button className="video-mini-play-toggle" onClick={() => onPlayState(!isPlaying)} title="Oynat / Duraklat" aria-label="Oynat / Duraklat">
+            <button className="video-mini-play-toggle" onClick={() => onPlayState(!isPlaying)} title={text("player.playPause")} aria-label={text("player.playPause")}>
               {isPlaying ? <Pause size={42} fill="currentColor" /> : <Play size={42} fill="currentColor" />}
             </button>
             <div className="video-mini-info">
               <div className="video-mini-info-title">{selectedVideo?.title}</div>
-              <div className="video-mini-info-meta">{isPlaying ? "Simdi oynatiliyor" : "Mini oynatici"}</div>
+              <div className="video-mini-info-meta">{isPlaying ? text("library.nowPlaying") : text("video.miniPlayer")}</div>
             </div>
             <div
               className="video-mini-progress"
               role="slider"
-              aria-label="Mini oynatma konumu"
+              aria-label={text("player.position")}
               aria-valuemin={0}
               aria-valuemax={Math.round(mediaDuration)}
               aria-valuenow={Math.round(mediaCurrent)}
@@ -8212,7 +10334,7 @@ function VideoPage({
             <div className="video-fs-timeline">
               <span>{formatTime(mediaCurrent)}</span>
               <input
-                aria-label="Video konumu"
+                aria-label={text("video.position")}
                 type="range"
                 min="0"
                 max={mediaDuration}
@@ -8222,21 +10344,21 @@ function VideoPage({
               <span>{formatTime(mediaDuration)}</span>
             </div>
             <div className="video-fs-control-row">
-              <button onClick={onPrev} title="Onceki" aria-label="Onceki">
+              <button onClick={onPrev} title={text("player.previous")} aria-label={text("player.previous")}>
                 <SkipBack size={20} />
               </button>
-              <button onClick={() => onSeekBy(-10)} title="10sn Geri" aria-label="10sn Geri">
+              <button onClick={() => onSeekBy(-10)} title={text("player.rewind10")} aria-label={text("player.rewind10")}>
                 <RotateCcw size={19} />
                 <span className="control-badge">10</span>
               </button>
-              <button className="video-fs-play" onClick={() => onPlayState(!isPlaying)} title="Oynat / Duraklat" aria-label="Oynat / Duraklat">
+              <button className="video-fs-play" onClick={() => onPlayState(!isPlaying)} title={text("player.playPause")} aria-label={text("player.playPause")}>
                 {isPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" />}
               </button>
-              <button onClick={() => onSeekBy(10)} title="10sn Ileri" aria-label="10sn Ileri">
+              <button onClick={() => onSeekBy(10)} title={text("player.forward10")} aria-label={text("player.forward10")}>
                 <RotateCw size={19} />
                 <span className="control-badge">10</span>
               </button>
-              <button onClick={onNext} title="Sonraki" aria-label="Sonraki">
+              <button onClick={onNext} title={text("player.next")} aria-label={text("player.next")}>
                 <SkipForward size={20} />
               </button>
               <div className="video-fs-right-tools">
@@ -8250,7 +10372,7 @@ function VideoPage({
                 >
                   <Volume2 size={20} />
                   <input
-                    aria-label="Ses seviyesi"
+                    aria-label={text("player.volume")}
                     type="range"
                     min="0"
                     max="1"
@@ -8265,7 +10387,7 @@ function VideoPage({
                 />
                   <b>{Math.round(volume * 100)}%</b>
                 </div>
-                <button className="video-fs-pill" onClick={cyclePlaybackSpeed} title="Calma hizi" aria-label="Calma hizi">
+                <button className="video-fs-pill" onClick={cyclePlaybackSpeed} title={text("video.speed")} aria-label={text("video.speed")}>
                   {playbackSpeed.toFixed(1)}x
                 </button>
                 <button className="video-fs-pill" onClick={cycleTargetFps} title="Hedef FPS" aria-label="Hedef FPS">
@@ -8280,13 +10402,13 @@ function VideoPage({
                       return next;
                     });
                   }}
-                  title="Ayarlar"
-                  aria-label="Ayarlar"
+                  title={text("rail.settings")}
+                  aria-label={text("rail.settings")}
                   aria-expanded={fsSettingsOpen}
                 >
                   <Settings size={22} />
                 </button>
-                <button onClick={toggleVideoFullscreen} title="Tam ekran" aria-label="Tam ekran">
+                <button onClick={toggleVideoFullscreen} title={text("video.fullscreen")} aria-label={text("video.fullscreen")}>
                   <Maximize2 size={20} />
                 </button>
               </div>
@@ -8296,10 +10418,10 @@ function VideoPage({
                 {fsSettingsView === "quality" ? (
                   <>
                     <div className="video-fs-settings-subhead">
-                      <button onClick={() => setFsSettingsView("main")} title="Geri" aria-label="Geri">
+                      <button onClick={() => setFsSettingsView("main")} title={text("nav.back")} aria-label={text("nav.back")}>
                         <ChevronLeft size={20} />
                       </button>
-                      <strong>Kalite</strong>
+                      <strong>{text("video.quality")}</strong>
                     </div>
                     {qualityOptions.map((option) => (
                       <button
@@ -8318,29 +10440,29 @@ function VideoPage({
                   </>
                 ) : (
                   <>
-                    <VideoSettingsToggle icon={<Volume2 size={19} />} label="Sabit ses" checked={stableVolume} onChange={setStableVolume} />
-                    <VideoSettingsToggle icon={<SlidersHorizontal size={19} />} label="Ses artirma" checked={volumeBoost} onChange={setVolumeBoost} />
+                    <VideoSettingsToggle icon={<Volume2 size={19} />} label={text("video.stableVolume")} checked={stableVolume} onChange={setStableVolume} />
+                    <VideoSettingsToggle icon={<SlidersHorizontal size={19} />} label={text("video.volumeBoost")} checked={volumeBoost} onChange={setVolumeBoost} />
                     <VideoSettingsToggle
                       icon={<Sun size={19} />}
-                      label="Sinematik isiklandirma"
+                      label={text("video.cinematicLight")}
                       checked={cinematicLighting}
                       onChange={setCinematicLighting}
                     />
-                    <VideoSettingsToggle icon={<ListMusic size={19} />} label="Ek Aciklamalar" checked={captionsEnabled} onChange={setCaptionsEnabled} />
+                    <VideoSettingsToggle icon={<ListMusic size={19} />} label={text("video.captions")} checked={captionsEnabled} onChange={setCaptionsEnabled} />
                     <button className="video-fs-settings-row">
-                      <span>Altyazilar (1)</span>
-                      <b>{captionsEnabled ? "Acik" : "Kapali"} ›</b>
+                      <span>{text("video.subtitles")}</span>
+                      <b>{captionsEnabled ? text("video.open") : text("video.closed")} ›</b>
                     </button>
                     <button className="video-fs-settings-row">
-                      <span>Uyku modu zamanlayici</span>
-                      <b>Kapali ›</b>
+                      <span>{text("video.sleepTimer")}</span>
+                      <b>{text("video.closed")} ›</b>
                     </button>
                     <button className="video-fs-settings-row" onClick={cyclePlaybackSpeed}>
-                      <span>Calma hizi</span>
-                      <b>{playbackSpeed === 1 ? "Normal" : `${playbackSpeed.toFixed(2).replace(/\.00$/, "")}x`} ›</b>
+                      <span>{text("video.speed")}</span>
+                      <b>{playbackSpeed === 1 ? text("video.normal") : `${playbackSpeed.toFixed(2).replace(/\.00$/, "")}x`} ›</b>
                     </button>
                     <button className="video-fs-settings-row" onClick={() => setFsSettingsView("quality")}>
-                      <span>Kalite</span>
+                      <span>{text("video.quality")}</span>
                       <b>{selectedQualityMenuLabel} ›</b>
                     </button>
                   </>
@@ -8552,6 +10674,7 @@ function PlayerBar({
   onSeekBy,
   onToggleMute,
   onVolume,
+  text,
 }: {
   page: PageId;
   currentTime: number;
@@ -8576,6 +10699,7 @@ function PlayerBar({
   onSeekBy: (seconds: number) => void;
   onToggleMute: () => void;
   onVolume: (value: number) => void;
+  text: (key: string) => string;
 }) {
   const mediaDuration = page === "video" ? videoDuration : duration;
   const mediaCurrent = page === "video" ? videoCurrentTime : currentTime;
@@ -8608,7 +10732,7 @@ function PlayerBar({
       <div className="timeline">
         <span>{formatTime(timelineValue)}</span>
         <input
-          aria-label="Oynatma konumu"
+          aria-label={text("player.position")}
           type="range"
           min="0"
           max={Math.max(1, mediaDuration)}
@@ -8633,48 +10757,48 @@ function PlayerBar({
         <span>{formatTime(mediaDuration)}</span>
       </div>
       <div className="player-controls">
-        <button className="danger" onClick={onClear} title="Temizle" aria-label="Temizle" disabled={disabled}>
+        <button className="danger" onClick={onClear} title={text("player.clear")} aria-label={text("player.clear")} disabled={disabled}>
           <Trash2 size={19} />
         </button>
-        <button title="Karistir" aria-label="Karistir" disabled={disabled}>
+        <button title={text("player.shuffle")} aria-label={text("player.shuffle")} disabled={disabled}>
           <Shuffle size={19} />
         </button>
-        <button onClick={onPrev} title="Onceki" aria-label="Onceki" disabled={disabled}>
+        <button onClick={onPrev} title={text("player.previous")} aria-label={text("player.previous")} disabled={disabled}>
           <SkipBack size={20} />
         </button>
-        <button onClick={() => onSeekBy(-10)} title="10sn Geri" aria-label="10sn Geri" disabled={disabled}>
+        <button onClick={() => onSeekBy(-10)} title={text("player.rewind10")} aria-label={text("player.rewind10")} disabled={disabled}>
           <RotateCcw size={19} />
           <span className="control-badge">10</span>
         </button>
-        <button className="play-btn" onClick={onPlayPause} title="Oynat / Duraklat" aria-label="Oynat / Duraklat">
+        <button className="play-btn" onClick={onPlayPause} title={text("player.playPause")} aria-label={text("player.playPause")}>
           {isPlaying ? <Pause size={26} fill="currentColor" /> : <Play size={26} fill="currentColor" />}
         </button>
-        <button onClick={() => onSeekBy(10)} title="10sn Ileri" aria-label="10sn Ileri" disabled={disabled}>
+        <button onClick={() => onSeekBy(10)} title={text("player.forward10")} aria-label={text("player.forward10")} disabled={disabled}>
           <RotateCw size={19} />
           <span className="control-badge">10</span>
         </button>
-        <button onClick={onNext} title="Sonraki" aria-label="Sonraki" disabled={disabled}>
+        <button onClick={onNext} title={text("player.next")} aria-label={text("player.next")} disabled={disabled}>
           <SkipForward size={20} />
         </button>
-        <button title="Tekrarla" aria-label="Tekrarla" disabled={disabled}>
+        <button title={text("player.repeat")} aria-label={text("player.repeat")} disabled={disabled}>
           <Repeat size={19} />
         </button>
-        <button title="Calan sarkiyi tekrarla" aria-label="Calan sarkiyi tekrarla" disabled={disabled}>
+        <button title={text("player.repeatOne")} aria-label={text("player.repeatOne")} disabled={disabled}>
           <Repeat1 size={19} />
         </button>
         <div className="volume">
           <button
             className={`volume-toggle ${muted ? "muted" : ""}`}
             onClick={onToggleMute}
-            title={muted ? "Sesi ac" : "Sessiz"}
-            aria-label={muted ? "Sesi ac" : "Sessiz"}
+            title={muted ? text("player.unmute") : text("player.mute")}
+            aria-label={muted ? text("player.unmute") : text("player.mute")}
             aria-pressed={muted}
             disabled={disabled}
           >
             {muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
           </button>
           <input
-            aria-label="Ses seviyesi"
+            aria-label={text("player.volume")}
             type="range"
             min="0"
             max="1"

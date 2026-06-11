@@ -4,13 +4,46 @@ export type WebAnimationMode = "compact" | "dock";
 export type WebMotionPreset = "calm" | "balanced" | "fast";
 export type WebUserAgentMode = "desktop" | "mobile" | "default";
 export type WebAutoplayPolicy = "allow" | "gesture" | "block";
-const WEB_SETTINGS_SCHEMA_VERSION = 4;
+export type AppLanguage = "tr-TR" | "ar-SA" | "en-US" | "es-ES";
+export type StartupPage = "music" | "video" | "gallery" | "web";
+export type AppTheme =
+  | "aur-renk-efektleri"
+  | "performance-balanced"
+  | "performance-lite"
+  | "ardali"
+  | "dark"
+  | "black"
+  | "light"
+  | "frappe"
+  | "onedark"
+  | "matrix"
+  | "latte"
+  | "solarized-dark"
+  | "neon-night"
+  | "retro-amber"
+  | "deep-ocean"
+  | "forest-mint";
+const WEB_SETTINGS_SCHEMA_VERSION = 8;
 
 export type WebSettings = {
   schemaVersion: number;
   enabled: boolean;
   persistentSession: boolean;
   privateMode: boolean;
+  language: AppLanguage;
+  theme: AppTheme;
+  followSystemTheme: boolean;
+  rememberLastSection: boolean;
+  startupPage: StartupPage;
+  playbackRestoreLastTrack: boolean;
+  playbackAutoplayLastTrack: boolean;
+  playbackResumePosition: boolean;
+  playbackFadeOnPause: boolean;
+  playbackFadeOnStop: boolean;
+  playbackFadeDurationMs: number;
+  playbackCrossfadeManual: boolean;
+  playbackCrossfadeAuto: boolean;
+  playbackCrossfadeMs: number;
   defaultPlatformId: string;
   rememberLastPlatform: boolean;
   restoreLastSession: boolean;
@@ -45,11 +78,37 @@ export type WebSettings = {
 export const WEB_SETTINGS_STORAGE_KEY = "ardali-web-settings";
 export const WEB_SETTINGS_EVENT = "web-settings-updated";
 
+export function detectSystemLanguage(): AppLanguage {
+  const languages =
+    typeof navigator === "undefined"
+      ? []
+      : [navigator.language, ...(Array.isArray(navigator.languages) ? navigator.languages : [])];
+  const normalized = languages.map((language) => String(language || "").toLowerCase());
+  if (normalized.some((language) => language.startsWith("ar"))) return "ar-SA";
+  if (normalized.some((language) => language.startsWith("es"))) return "es-ES";
+  if (normalized.some((language) => language.startsWith("tr"))) return "tr-TR";
+  return "en-US";
+}
+
 export const defaultWebSettings: WebSettings = {
   schemaVersion: WEB_SETTINGS_SCHEMA_VERSION,
   enabled: true,
   persistentSession: true,
   privateMode: false,
+  language: detectSystemLanguage(),
+  theme: "black",
+  followSystemTheme: false,
+  rememberLastSection: true,
+  startupPage: "music",
+  playbackRestoreLastTrack: true,
+  playbackAutoplayLastTrack: false,
+  playbackResumePosition: true,
+  playbackFadeOnPause: false,
+  playbackFadeOnStop: true,
+  playbackFadeDurationMs: 700,
+  playbackCrossfadeManual: true,
+  playbackCrossfadeAuto: true,
+  playbackCrossfadeMs: 2000,
   defaultPlatformId: "youtube",
   rememberLastPlatform: true,
   restoreLastSession: true,
@@ -104,6 +163,41 @@ export function normalizeWebSettings(value: Partial<WebSettings> | null | undefi
     enabled: bool(raw.enabled, defaultWebSettings.enabled),
     persistentSession: bool(raw.persistentSession, defaultWebSettings.persistentSession),
     privateMode: bool(raw.privateMode, defaultWebSettings.privateMode),
+    language: oneOf(raw.language, ["tr-TR", "ar-SA", "en-US", "es-ES"] as const, defaultWebSettings.language),
+    theme: oneOf(
+      raw.theme,
+      [
+        "aur-renk-efektleri",
+        "performance-balanced",
+        "performance-lite",
+        "ardali",
+        "dark",
+        "black",
+        "light",
+        "frappe",
+        "onedark",
+        "matrix",
+        "latte",
+        "solarized-dark",
+        "neon-night",
+        "retro-amber",
+        "deep-ocean",
+        "forest-mint",
+      ] as const,
+      defaultWebSettings.theme,
+    ),
+    followSystemTheme: bool(raw.followSystemTheme, defaultWebSettings.followSystemTheme),
+    rememberLastSection: bool(raw.rememberLastSection, defaultWebSettings.rememberLastSection),
+    startupPage: oneOf(raw.startupPage, ["music", "video", "gallery", "web"] as const, defaultWebSettings.startupPage),
+    playbackRestoreLastTrack: bool(raw.playbackRestoreLastTrack, defaultWebSettings.playbackRestoreLastTrack),
+    playbackAutoplayLastTrack: bool(raw.playbackAutoplayLastTrack, defaultWebSettings.playbackAutoplayLastTrack),
+    playbackResumePosition: bool(raw.playbackResumePosition, defaultWebSettings.playbackResumePosition),
+    playbackFadeOnPause: bool(raw.playbackFadeOnPause, defaultWebSettings.playbackFadeOnPause),
+    playbackFadeOnStop: bool(raw.playbackFadeOnStop, defaultWebSettings.playbackFadeOnStop),
+    playbackFadeDurationMs: numberInRange(raw.playbackFadeDurationMs, defaultWebSettings.playbackFadeDurationMs, 0, 5000),
+    playbackCrossfadeManual: bool(raw.playbackCrossfadeManual, defaultWebSettings.playbackCrossfadeManual),
+    playbackCrossfadeAuto: bool(raw.playbackCrossfadeAuto, defaultWebSettings.playbackCrossfadeAuto),
+    playbackCrossfadeMs: numberInRange(raw.playbackCrossfadeMs, defaultWebSettings.playbackCrossfadeMs, 0, 15000),
     defaultPlatformId: typeof raw.defaultPlatformId === "string" && raw.defaultPlatformId.trim() ? raw.defaultPlatformId : defaultWebSettings.defaultPlatformId,
     rememberLastPlatform: bool(raw.rememberLastPlatform, defaultWebSettings.rememberLastPlatform),
     restoreLastSession: bool(raw.restoreLastSession, defaultWebSettings.restoreLastSession),

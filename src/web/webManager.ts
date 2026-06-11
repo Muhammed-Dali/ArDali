@@ -381,10 +381,17 @@ try {
     merger.connect(stereoOutput);
     const panner = context.createStereoPanner ? context.createStereoPanner() : null;
     const master = context.createGain();
+    master.gain.value = 0;
+    const rawAnalyser = context.createAnalyser();
+    rawAnalyser.fftSize = 2048;
+    rawAnalyser.smoothingTimeConstant = 0.68;
+    rawAnalyser.minDecibels = -92;
+    rawAnalyser.maxDecibels = -8;
     const analyser = context.createAnalyser();
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.72;
 
+    source.connect(rawAnalyser);
     source.connect(daliInput);
     let node = daliOutput;
     [
@@ -488,7 +495,9 @@ try {
       width,
       panner,
       master,
+      rawAnalyser,
       analyser,
+      warmedUp: false,
     };
     root.graphs.set(media, graph);
     return graph;
@@ -623,7 +632,14 @@ try {
     graph.width.gain.setTargetAtTime(centerLift * surroundLift, now, 0.018);
     if (graph.panner) graph.panner.pan.setTargetAtTime(enabled ? clamp(dsp.balance, -100, 100, 0) / 100 : 0, now, 0.018);
     const mediaVolume = graph.media?.muted ? 0 : clamp(graph.media?.volume, 0, 1, 1);
-    graph.master.gain.setTargetAtTime(mediaVolume, now, 0.008);
+    if (!graph.warmedUp) {
+      graph.warmedUp = true;
+      graph.master.gain.cancelScheduledValues(now);
+      graph.master.gain.setValueAtTime(0, now);
+      graph.master.gain.linearRampToValueAtTime(mediaVolume, now + 0.08);
+    } else {
+      graph.master.gain.setTargetAtTime(mediaVolume, now, 0.018);
+    }
   };
 
   const allMediaElements = Array.from(document.querySelectorAll("video, audio"));
@@ -637,7 +653,7 @@ try {
   const activeMediaElements = allMediaElements.filter(isActiveMedia);
   const selectMediaElements = (items) => {
     const activeItems = items.filter(isActiveMedia);
-    return (activeItems.length > 0 ? activeItems : items)
+    return activeItems
       .filter((media) => !!media)
       .sort((a, b) => {
         const aScore = (isActiveMedia(a) ? 100 : 0) + Number(a.readyState || 0);
@@ -694,17 +710,33 @@ try {
     });
     root.observer.observe(document.documentElement, { childList: true, subtree: true });
   }
-  root.getSpectrumSnapshot = (bands = 96) => {
-    const first = Array.from(document.querySelectorAll("video, audio"))
-      .map((media) => root.graphs.get(media))
-      .find(Boolean);
-    if (!first) return [];
-    const raw = new Uint8Array(first.analyser.frequencyBinCount);
-    first.analyser.getByteFrequencyData(raw);
+  const graphForActiveMedia = () => Array.from(document.querySelectorAll("video, audio"))
+    .map((media) => root.graphs.get(media))
+    .find((graph) => graph && graph.media && isActiveMedia(graph.media));
+  const spectrumFromAnalyser = (analyser, bands = 96) => {
+    if (!analyser) return [];
+    const raw = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(raw);
     return Array.from({ length: Math.max(1, Math.min(512, Number(bands) || 96)) }, (_, index) => {
       const pos = Math.floor((index / Math.max(1, bands - 1)) * (raw.length - 1));
       return raw[pos] / 255;
     });
+  };
+  root.getSpectrumSnapshot = (bands = 96) => {
+    const first = graphForActiveMedia();
+    return first ? spectrumFromAnalyser(first.analyser, bands) : [];
+  };
+  root.getRawSpectrumSnapshot = (bands = 96) => {
+    const first = graphForActiveMedia();
+    return first ? spectrumFromAnalyser(first.rawAnalyser, bands) : [];
+  };
+  root.getRawPcmSnapshot = (samples = 1024) => {
+    const first = graphForActiveMedia();
+    if (!first || !first.rawAnalyser) return [];
+    const count = Math.max(64, Math.min(4096, Number(samples) || 1024));
+    const pcm = new Float32Array(count);
+    first.rawAnalyser.getFloatTimeDomainData(pcm);
+    return Array.from(pcm);
   };
   const result = {
     ok: connected > 0,
@@ -775,6 +807,18 @@ try {
 
 export async function applyWebDaliEffects(payload: WebDaliPayload) {
   await invoke("apply_web_dali_script", { script: webDaliInjectionScript(payload) });
+}
+
+export async function getWebDaliRawSpectrum(bands: number) {
+  const snapshot = await invoke<string>("web_dali_audio_snapshot", { kind: "raw-spectrum", size: bands });
+  const parsed = JSON.parse(snapshot || "{}") as { ok?: boolean; values?: number[] };
+  return parsed.ok && Array.isArray(parsed.values) ? parsed.values : [];
+}
+
+export async function getWebDaliRawPcm(samples: number) {
+  const snapshot = await invoke<string>("web_dali_audio_snapshot", { kind: "raw-pcm", size: samples });
+  const parsed = JSON.parse(snapshot || "{}") as { ok?: boolean; values?: number[] };
+  return parsed.ok && Array.isArray(parsed.values) ? parsed.values : [];
 }
 
 export async function clearWebData(target: "cache" | "cookies" | "site-data" | "all") {

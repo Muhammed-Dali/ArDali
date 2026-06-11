@@ -1,9 +1,11 @@
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url};
 
 #[cfg(target_os = "linux")]
+use javascriptcore::ValueExt;
+#[cfg(target_os = "linux")]
 use gtk::prelude::*;
 #[cfg(target_os = "linux")]
-use std::{cell::RefCell, fs, fs::OpenOptions, sync::mpsc};
+use std::{cell::RefCell, fs, fs::OpenOptions, sync::mpsc, time::Duration};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
@@ -16,6 +18,7 @@ use webkit2gtk::{
 struct GtkWebState {
     overlay: gtk::Overlay,
     webview: Option<webkit2gtk::WebView>,
+    resize_grip: Option<gtk::EventBox>,
     private_mode: bool,
 }
 
@@ -130,6 +133,114 @@ where
 }
 
 #[cfg(target_os = "linux")]
+fn run_web_javascript_string(app: &AppHandle, script: String) -> Result<String, String> {
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+    let (tx, rx) = mpsc::channel();
+
+    window
+        .run_on_main_thread(move || {
+            GTK_WEB_STATE.with(|state| {
+                let Some(webview) = state
+                    .borrow()
+                    .as_ref()
+                    .and_then(|state| state.webview.clone())
+                else {
+                    let _ = tx.send(Err("GTK webview is not available".to_string()));
+                    return;
+                };
+
+                #[allow(deprecated)]
+                webview.run_javascript(
+                    &script,
+                    webkit2gtk::gio::Cancellable::NONE,
+                    move |result| {
+                        let message = match result {
+                            Ok(result) => result
+                                .js_value()
+                                .map(|value| value.to_str().to_string())
+                                .ok_or_else(|| "JavaScript sonucu bos".to_string()),
+                            Err(error) => Err(error.to_string()),
+                        };
+                        let _ = tx.send(message);
+                    },
+                );
+            });
+        })
+        .map_err(|error| error.to_string())?;
+
+    rx.recv_timeout(Duration::from_millis(900))
+        .map_err(|error| error.to_string())?
+}
+
+#[cfg(target_os = "linux")]
+fn create_web_resize_grip() -> gtk::EventBox {
+    let grip = gtk::EventBox::new();
+    grip.set_halign(gtk::Align::End);
+    grip.set_valign(gtk::Align::End);
+    grip.set_size_request(22, 22);
+    grip.add_events(
+        gtk::gdk::EventMask::BUTTON_PRESS_MASK
+            | gtk::gdk::EventMask::ENTER_NOTIFY_MASK
+            | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK,
+    );
+
+    let drawing = gtk::DrawingArea::new();
+    drawing.set_size_request(22, 22);
+    drawing.connect_draw(|_, cr| {
+        cr.set_line_width(1.35);
+        cr.set_source_rgba(0.06, 0.88, 1.0, 0.9);
+        for offset in [6.0, 11.0, 16.0] {
+            cr.move_to(20.0 - offset, 20.0);
+            cr.line_to(20.0, 20.0 - offset);
+            let _ = cr.stroke();
+        }
+        glib::Propagation::Proceed
+    });
+    grip.add(&drawing);
+
+    grip.connect_enter_notify_event(|widget, _| {
+        if let (Some(window), Some(display)) = (widget.window(), gtk::gdk::Display::default()) {
+            let cursor = gtk::gdk::Cursor::from_name(&display, "se-resize")
+                .or_else(|| gtk::gdk::Cursor::from_name(&display, "nwse-resize"));
+            window.set_cursor(cursor.as_ref());
+        }
+        glib::Propagation::Proceed
+    });
+
+    grip.connect_leave_notify_event(|widget, _| {
+        if let Some(window) = widget.window() {
+            window.set_cursor(None);
+        }
+        glib::Propagation::Proceed
+    });
+
+    grip.connect_button_press_event(|widget, event| {
+        if event.button() == 1 {
+            if let Some(window) = widget
+                .toplevel()
+                .and_then(|widget| widget.downcast::<gtk::Window>().ok())
+            {
+                let (root_x, root_y) = event.root();
+                window.begin_resize_drag(
+                    gtk::gdk::WindowEdge::SouthEast,
+                    event.button() as i32,
+                    root_x.round() as i32,
+                    root_y.round() as i32,
+                    event.time(),
+                );
+                return glib::Propagation::Stop;
+            }
+        }
+
+        glib::Propagation::Proceed
+    });
+
+    grip
+}
+
+#[cfg(target_os = "linux")]
 fn install_or_update_gtk_webview(
     app: &AppHandle,
     url: String,
@@ -179,6 +290,7 @@ fn install_or_update_gtk_webview(
                 *state = Some(GtkWebState {
                     overlay,
                     webview: None,
+                    resize_grip: None,
                     private_mode,
                 });
             }
@@ -291,6 +403,14 @@ fn install_or_update_gtk_webview(
                 state.webview = Some(webview);
             }
 
+            if state.resize_grip.is_none() {
+                let resize_grip = create_web_resize_grip();
+                state.overlay.add_overlay(&resize_grip);
+                state.overlay.set_overlay_pass_through(&resize_grip, false);
+                resize_grip.show_all();
+                state.resize_grip = Some(resize_grip);
+            }
+
             let webview = state
                 .webview
                 .as_ref()
@@ -300,6 +420,11 @@ fn install_or_update_gtk_webview(
             webview.set_margin_top(y);
             webview.set_size_request(width, height);
             webview.show_all();
+            if let Some(resize_grip) = state.resize_grip.as_ref() {
+                resize_grip.set_margin_end(5);
+                resize_grip.set_margin_bottom(5);
+                resize_grip.show_all();
+            }
             webview.grab_focus();
 
             let webview_for_load = webview.clone();
@@ -379,6 +504,9 @@ fn destroy_gtk_webview(app: &AppHandle) -> Result<(), String> {
                     webview.load_uri("about:blank");
                     state.overlay.remove(&webview);
                 }
+                if let Some(resize_grip) = state.resize_grip.take() {
+                    state.overlay.remove(&resize_grip);
+                }
             }
 
             Ok(())
@@ -397,6 +525,9 @@ fn park_gtk_webview(app: &AppHandle) -> Result<(), String> {
             if let Some(state) = state.borrow().as_ref() {
                 if let Some(webview) = state.webview.as_ref() {
                     webview.hide();
+                }
+                if let Some(resize_grip) = state.resize_grip.as_ref() {
+                    resize_grip.hide();
                 }
             }
 
@@ -611,6 +742,45 @@ pub async fn apply_web_dali_script(app: AppHandle, script: String) -> Result<(),
 
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = script;
+        Err("Embedded web view is currently implemented for Linux only".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn web_dali_audio_snapshot(
+    app: AppHandle,
+    kind: String,
+    size: u32,
+) -> Result<String, String> {
+    let safe_size = size.clamp(1, 4096);
+    let function_name = match kind.as_str() {
+        "raw-pcm" => "getRawPcmSnapshot",
+        "processed-spectrum" => "getSpectrumSnapshot",
+        _ => "getRawSpectrumSnapshot",
+    };
+    let script = format!(
+        r#"(() => {{
+  try {{
+    const root = window.__ARDALI_DALI_WEB__;
+    const fn = root && root.{function_name};
+    if (typeof fn !== "function") return JSON.stringify({{ ok: false, values: [], error: "web-dali-snapshot-unavailable" }});
+    const values = fn({safe_size});
+    return JSON.stringify({{ ok: Array.isArray(values), values: Array.isArray(values) ? values : [] }});
+  }} catch (error) {{
+    return JSON.stringify({{ ok: false, values: [], error: String(error && error.message ? error.message : error) }});
+  }}
+}})()"#
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        run_web_javascript_string(&app, script)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
         let _ = script;
         Err("Embedded web view is currently implemented for Linux only".to_string())
     }

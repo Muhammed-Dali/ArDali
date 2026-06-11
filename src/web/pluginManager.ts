@@ -81,7 +81,11 @@ export async function loadArdaliStoreItems(): Promise<ArdaliStoreItem[]> {
   });
 }
 
-export function setPluginInstalled(pluginId: string, installed: boolean) {
+export async function setPluginInstalled(pluginId: string, installed: boolean) {
+  if (installed) {
+    await invoke("install_plugin", { pluginId });
+  }
+
   const state = readPluginState();
   state[pluginId] = {
     installed,
