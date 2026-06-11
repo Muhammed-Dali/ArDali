@@ -42,6 +42,7 @@ static MPRIS_BRIDGE: OnceLock<Mutex<Option<mpsc::Sender<MprisCommand>>>> = OnceL
 static APP_QUITTING: AtomicBool = AtomicBool::new(false);
 static TRAY_READY: AtomicBool = AtomicBool::new(false);
 const MEDIA_SERVER_ADDR: &str = "127.0.0.1:1421";
+const VISUALIZER_ICON_BMP: &[u8] = include_bytes!("../icons/ardali_256.bmp");
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1170,6 +1171,18 @@ fn configure_packaged_webkit_runtime() {
     if std::env::var_os("WEBKIT_DISABLE_SANDBOX").is_none() {
         std::env::set_var("WEBKIT_DISABLE_SANDBOX", "1");
     }
+    if std::env::var_os("GST_PLUGIN_SYSTEM_PATH_1_0").is_none() {
+        std::env::set_var(
+            "GST_PLUGIN_SYSTEM_PATH_1_0",
+            "/usr/lib/gstreamer-1.0:/usr/lib64/gstreamer-1.0:/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
+        );
+    }
+    if std::env::var_os("GST_PLUGIN_PATH_1_0").is_none() {
+        std::env::set_var(
+            "GST_PLUGIN_PATH_1_0",
+            "/usr/lib/gstreamer-1.0:/usr/lib64/gstreamer-1.0:/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
+        );
+    }
 }
 
 fn app_language_to_locale(language: Option<&str>) -> &'static str {
@@ -1266,6 +1279,19 @@ fn projectm_log_file(app: &tauri::AppHandle) -> Option<PathBuf> {
         .map(|dir| dir.join("projectm-visualizer.log"))
 }
 
+fn visualizer_icon_file(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_data_dir().ok()?.join("native-tools");
+    if fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+    let icon = dir.join("ardali-visualizer-icon.bmp");
+    match fs::write(&icon, VISUALIZER_ICON_BMP) {
+        Ok(_) => Some(icon),
+        Err(_) if icon.exists() => Some(icon),
+        Err(_) => None,
+    }
+}
+
 #[tauri::command]
 fn start_projectm_visualizer(
     app: tauri::AppHandle,
@@ -1305,8 +1331,14 @@ fn start_projectm_visualizer(
         .env("ARDALI_VIS_CLARITY_MODE", "sharp")
         .env("ARDALI_LANG", app_language_to_locale(language.as_deref()))
         .env("ARDALI_UI_THEME", theme.as_deref().unwrap_or("black"))
+        .env("ARDALI_VIS_WMCLASS", "com.ardali.mediaplayer")
+        .env("ARDALI_VIS_DESKTOP_ENTRY", "com.ardali.mediaplayer")
         .current_dir(working_dir)
         .stdin(Stdio::piped());
+
+    if let Some(icon) = visualizer_icon_file(&app) {
+        command.env("ARDALI_VISUALIZER_ICON", icon);
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -1316,6 +1348,13 @@ fn start_projectm_visualizer(
             library_path.push(existing);
         }
         command.env("LD_LIBRARY_PATH", library_path);
+
+        if let Some(driver) = std::env::var("ARDALI_VIS_SDL_DRIVER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            command.env("SDL_VIDEODRIVER", driver);
+        }
     }
 
     let log_file = projectm_log_file(&app);
