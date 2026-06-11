@@ -3922,6 +3922,7 @@ export function App() {
   const [activeWebPlatformId, setActiveWebPlatformId] = useState(platforms[0]?.id ?? "");
   const [storeItems, setStoreItems] = useState<ArdaliStoreItem[]>([]);
   const [storeStatus, setStoreStatus] = useState("");
+  const [webRuntimeStatus, setWebRuntimeStatus] = useState("");
   const [webChromeHidden, setWebChromeHidden] = useState(false);
   const activeWebPlatformIdRef = useRef(platforms[0]?.id ?? "");
   const lastWebPlatformIdRef = useRef(platforms[0]?.id ?? "");
@@ -4129,6 +4130,7 @@ export function App() {
     let unlisten: (() => void) | undefined;
     void listen<string>("webview-load-finished", (event) => {
       if (pageRef.current !== "web") return;
+      setWebRuntimeStatus("");
       scheduleCurrentWebDaliEffects("load-finished");
       scheduleOfficialPluginsForUrl(event.payload, "load-finished");
     }).then((dispose) => {
@@ -4136,6 +4138,20 @@ export function App() {
     });
     return () => unlisten?.();
   }, [scheduleCurrentWebDaliEffects, scheduleOfficialPluginsForUrl]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return undefined;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("webview-load-failed", (event) => {
+      if (pageRef.current !== "web") return;
+      const platformName = platforms.find((platform) => platform.id === activeWebPlatformIdRef.current)?.name ?? "Web";
+      setWebRuntimeStatus(`${platformName} yuklenemedi. Yeniden deneniyor... ${event.payload}`);
+      reportClientError("webview.load-failed", event.payload);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => unlisten?.();
+  }, []);
 
   useEffect(() => {
     refreshStoreItems();
@@ -5479,8 +5495,13 @@ export function App() {
     activeWebPlatformIdRef.current = platform.id;
     lastWebPlatformIdRef.current = platform.id;
     setActiveWebPlatformId(platform.id);
+    setWebRuntimeStatus(`${platform.name} yukleniyor...`);
     const platformUrl = webSettings.preferHttps ? platform.url.replace(/^http:/i, "https:") : platform.url;
-    await openPlatform(platformUrl).catch((error) => reportClientError("web.open-platform", error));
+    await openPlatform(platformUrl).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      setWebRuntimeStatus(`${platform.name} acilamadi: ${message}`);
+      reportClientError("web.open-platform", error);
+    });
     scheduleCurrentWebDaliEffects("platform-open");
     scheduleOfficialPluginsForUrl(platformUrl, "platform-open");
   }, [scheduleCurrentWebDaliEffects, scheduleOfficialPluginsForUrl, webSettings.preferHttps]);
@@ -7426,7 +7447,7 @@ export function App() {
         </div>
 
         {page === "web" ? (
-        <div className="web-stage" aria-hidden={activeWebPlatformId !== ARDALI_STORE_PLATFORM_ID}>
+        <div className="web-stage" aria-hidden={activeWebPlatformId !== ARDALI_STORE_PLATFORM_ID && !webRuntimeStatus}>
           {activeWebPlatformId === ARDALI_STORE_PLATFORM_ID ? (
             <ArdaliStoreView
               items={storeItems}
@@ -7436,6 +7457,8 @@ export function App() {
               onToggle={handleTogglePlugin}
               onClose={closeArdaliStore}
             />
+          ) : webRuntimeStatus ? (
+            <div className="web-runtime-status" role="status">{webRuntimeStatus}</div>
           ) : null}
         </div>
         ) : (

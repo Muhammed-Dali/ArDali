@@ -132,7 +132,7 @@ export const defaultWebSettings: WebSettings = {
   allowLocation: false,
   allowNotifications: false,
   allowPopups: true,
-  userAgentMode: "desktop",
+  userAgentMode: "default",
   autoplayPolicy: "allow",
   askDownloadLocation: true,
   reduceReferrers: true,

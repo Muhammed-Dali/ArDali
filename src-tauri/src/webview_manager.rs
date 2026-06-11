@@ -1,13 +1,13 @@
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url};
 
 #[cfg(target_os = "linux")]
-use javascriptcore::ValueExt;
-#[cfg(target_os = "linux")]
 use gtk::prelude::*;
 #[cfg(target_os = "linux")]
-use std::{cell::RefCell, fs, fs::OpenOptions, sync::mpsc, time::Duration};
+use javascriptcore::ValueExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::{cell::RefCell, fs, fs::OpenOptions, sync::mpsc, time::Duration};
 #[cfg(target_os = "linux")]
 use webkit2gtk::{
     CookieManagerExt, CookiePersistentStorage, LoadEvent, SettingsExt, WebContext, WebViewExt,
@@ -387,32 +387,48 @@ fn install_or_update_gtk_webview(
                     glib::Propagation::Proceed
                 });
 
+                let app_for_load_failed = app_for_events.clone();
                 webview.connect_load_failed(move |webview, _, failing_uri, error| {
                     let failing_uri = failing_uri.to_string();
-                    let error_message = error.message().to_string().to_lowercase();
+                    let original_error_message = error.message().to_string();
+                    let error_message = original_error_message.to_lowercase();
 
                     if error_message.contains("cancel") || error_message.contains("iptal") {
                         return true;
                     }
 
+                    let _ = app_for_load_failed.emit(
+                        "webview-load-failed",
+                        format!("{failing_uri}: {original_error_message}"),
+                    );
+
                     webview.load_html(web_silent_retry_html(), Some("about:blank"));
 
                     let webview_for_retry = webview.clone();
                     let retry_uri = failing_uri.clone();
-                    gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(700), move || {
-                        webview_for_retry.load_uri(&retry_uri);
-                    });
+                    gtk::glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(700),
+                        move || {
+                            webview_for_retry.load_uri(&retry_uri);
+                        },
+                    );
 
                     let webview_for_late_retry = webview.clone();
                     let late_retry_uri = failing_uri.clone();
-                    gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(1800), move || {
-                        webview_for_late_retry.load_uri(&late_retry_uri);
-                    });
+                    gtk::glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(1800),
+                        move || {
+                            webview_for_late_retry.load_uri(&late_retry_uri);
+                        },
+                    );
 
                     let webview_for_final_retry = webview.clone();
-                    gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(3600), move || {
-                        webview_for_final_retry.load_uri(&failing_uri);
-                    });
+                    gtk::glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(3600),
+                        move || {
+                            webview_for_final_retry.load_uri(&failing_uri);
+                        },
+                    );
 
                     true
                 });
@@ -480,22 +496,31 @@ fn install_or_update_gtk_webview(
             if created_webview {
                 let webview_for_retry = webview.clone();
                 let url_for_retry = url.clone();
-                gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(350), move || {
-                    webview_for_retry.load_uri(&url_for_retry);
-                    webview_for_retry.grab_focus();
-                });
+                gtk::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(350),
+                    move || {
+                        webview_for_retry.load_uri(&url_for_retry);
+                        webview_for_retry.grab_focus();
+                    },
+                );
 
                 let webview_for_late_retry = webview.clone();
-                gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(1200), move || {
-                    webview_for_late_retry.load_uri(&url);
-                    webview_for_late_retry.grab_focus();
-                });
+                gtk::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(1200),
+                    move || {
+                        webview_for_late_retry.load_uri(&url);
+                        webview_for_late_retry.grab_focus();
+                    },
+                );
             } else {
                 let webview_for_refresh = webview.clone();
-                gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
-                    webview_for_refresh.load_uri(&url);
-                    webview_for_refresh.grab_focus();
-                });
+                gtk::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(120),
+                    move || {
+                        webview_for_refresh.load_uri(&url);
+                        webview_for_refresh.grab_focus();
+                    },
+                );
             }
 
             Ok(())
@@ -607,16 +632,20 @@ fn navigate_gtk_web_history(app: &AppHandle, direction: &str) -> Result<(), Stri
 #[cfg(target_os = "linux")]
 fn web_data_types_for_target(target: &str) -> WebsiteDataTypes {
     match target {
-        "cache" => WebsiteDataTypes::MEMORY_CACHE
-            | WebsiteDataTypes::DISK_CACHE
-            | WebsiteDataTypes::OFFLINE_APPLICATION_CACHE,
+        "cache" => {
+            WebsiteDataTypes::MEMORY_CACHE
+                | WebsiteDataTypes::DISK_CACHE
+                | WebsiteDataTypes::OFFLINE_APPLICATION_CACHE
+        }
         "cookies" => WebsiteDataTypes::COOKIES,
-        "site-data" => WebsiteDataTypes::SESSION_STORAGE
-            | WebsiteDataTypes::LOCAL_STORAGE
-            | WebsiteDataTypes::INDEXEDDB_DATABASES
-            | WebsiteDataTypes::WEBSQL_DATABASES
-            | WebsiteDataTypes::DOM_CACHE
-            | WebsiteDataTypes::SERVICE_WORKER_REGISTRATIONS,
+        "site-data" => {
+            WebsiteDataTypes::SESSION_STORAGE
+                | WebsiteDataTypes::LOCAL_STORAGE
+                | WebsiteDataTypes::INDEXEDDB_DATABASES
+                | WebsiteDataTypes::WEBSQL_DATABASES
+                | WebsiteDataTypes::DOM_CACHE
+                | WebsiteDataTypes::SERVICE_WORKER_REGISTRATIONS
+        }
         _ => WebsiteDataTypes::ALL,
     }
 }
@@ -657,7 +686,6 @@ fn clear_gtk_web_data(app: &AppHandle, target: String) -> Result<(), String> {
         })
     })
 }
-
 
 #[tauri::command]
 pub async fn open_web_platform(
@@ -779,7 +807,11 @@ pub async fn apply_web_dali_script(app: AppHandle, script: String) -> Result<(),
 
         run_on_main_window(window, move |_| {
             GTK_WEB_STATE.with(|state| {
-                if let Some(webview) = state.borrow().as_ref().and_then(|state| state.webview.as_ref()) {
+                if let Some(webview) = state
+                    .borrow()
+                    .as_ref()
+                    .and_then(|state| state.webview.as_ref())
+                {
                     #[allow(deprecated)]
                     webview.run_javascript(&script, webkit2gtk::gio::Cancellable::NONE, |result| {
                         if let Err(error) = result {

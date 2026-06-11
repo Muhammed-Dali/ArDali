@@ -24,6 +24,7 @@ use std::{
 use tauri::{
     image::Image,
     menu::{CheckMenuItem, IconMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    path::BaseDirectory,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, Runtime, UserAttentionType, WindowEvent,
 };
@@ -1068,6 +1069,23 @@ fn visualizer_platform_dir() -> &'static str {
 fn find_visualizer_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
     let exe_name = visualizer_exe_name();
     let mut candidates = Vec::new();
+    if let Ok(path) = app.path().resolve(exe_name, BaseDirectory::Resource) {
+        candidates.push(path);
+    }
+    if let Ok(path) = app.path().resolve(
+        Path::new("native-dist")
+            .join(visualizer_platform_dir())
+            .join(exe_name),
+        BaseDirectory::Resource,
+    ) {
+        candidates.push(path);
+    }
+    if let Ok(path) = app.path().resolve(
+        Path::new("native-dist").join(exe_name),
+        BaseDirectory::Resource,
+    ) {
+        candidates.push(path);
+    }
     for root in project_root_candidates(app) {
         candidates.push(root.join(exe_name));
         candidates.push(
@@ -1084,6 +1102,18 @@ fn find_visualizer_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
 
 fn find_visualizer_presets(app: &tauri::AppHandle) -> Option<PathBuf> {
     let mut candidates = Vec::new();
+    if let Ok(path) = app
+        .path()
+        .resolve("visualizer-presets", BaseDirectory::Resource)
+    {
+        candidates.push(path);
+    }
+    if let Ok(path) = app.path().resolve(
+        Path::new("public").join("visualizer-presets"),
+        BaseDirectory::Resource,
+    ) {
+        candidates.push(path);
+    }
     for root in project_root_candidates(app) {
         candidates.push(root.join("public").join("visualizer-presets"));
         candidates.push(root.join("visualizer-presets"));
@@ -1101,8 +1131,63 @@ fn app_language_to_locale(language: Option<&str>) -> &'static str {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn prepare_visualizer_executable(app: &tauri::AppHandle, exe: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::metadata(exe)
+        .map_err(|error| format!("ProjectM binary okunamadi: {} ({error})", exe.display()))?;
+    if metadata.permissions().mode() & 0o111 != 0 {
+        return Ok(exe.to_path_buf());
+    }
+
+    let runtime_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("native-tools")
+        .join(visualizer_platform_dir());
+    fs::create_dir_all(&runtime_dir).map_err(|error| {
+        format!(
+            "ProjectM runtime klasoru olusturulamadi: {} ({error})",
+            runtime_dir.display()
+        )
+    })?;
+
+    let runtime_exe = runtime_dir.join(visualizer_exe_name());
+    fs::copy(exe, &runtime_exe).map_err(|error| {
+        format!(
+            "ProjectM binary kopyalanamadi: {} -> {} ({error})",
+            exe.display(),
+            runtime_exe.display()
+        )
+    })?;
+
+    let mut permissions = fs::metadata(&runtime_exe)
+        .map_err(|error| {
+            format!(
+                "ProjectM kopyasi okunamadi: {} ({error})",
+                runtime_exe.display()
+            )
+        })?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&runtime_exe, permissions).map_err(|error| {
+        format!(
+            "ProjectM calistirma izni verilemedi: {} ({error})",
+            runtime_exe.display()
+        )
+    })?;
+
+    Ok(runtime_exe)
+}
+
 #[tauri::command]
-fn start_projectm_visualizer(app: tauri::AppHandle, language: Option<String>, theme: Option<String>) -> Result<String, String> {
+fn start_projectm_visualizer(
+    app: tauri::AppHandle,
+    language: Option<String>,
+    theme: Option<String>,
+) -> Result<String, String> {
     let mut process = PROJECTM_PROCESS.lock().map_err(|error| error.to_string())?;
     if let Some(child) = process.as_mut() {
         if child
@@ -1114,9 +1199,13 @@ fn start_projectm_visualizer(app: tauri::AppHandle, language: Option<String>, th
         }
     }
 
-    let exe = find_visualizer_executable(&app).ok_or_else(|| {
+    let mut exe = find_visualizer_executable(&app).ok_or_else(|| {
         "ProjectM binary bulunamadi. Once `npm run visualizer:build` calistirin.".to_string()
     })?;
+    #[cfg(target_os = "linux")]
+    {
+        exe = prepare_visualizer_executable(&app, &exe)?;
+    }
     let presets = find_visualizer_presets(&app)
         .ok_or_else(|| "ProjectM milk preset klasoru bulunamadi.".to_string())?;
     let working_dir = exe.parent().unwrap_or_else(|| Path::new("."));
@@ -1136,16 +1225,18 @@ fn start_projectm_visualizer(app: tauri::AppHandle, language: Option<String>, th
         .stdin(Stdio::piped());
 
     if cfg!(debug_assertions) {
-        command
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else {
         command.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
-    let child = command
-        .spawn()
-        .map_err(|error| format!("ProjectM baslatilamadi: {error}"))?;
+    let child = command.spawn().map_err(|error| {
+        format!(
+            "ProjectM baslatilamadi: {} | presets: {} | hata: {error}",
+            exe.display(),
+            presets.display()
+        )
+    })?;
 
     *process = Some(child);
     Ok(format!("ProjectM baslatildi: {}", exe.display()))
@@ -2056,7 +2147,8 @@ where
 fn update_tray_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
     let menu = create_tray_menu(&app, &language).map_err(|error| error.to_string())?;
     if let Some(tray) = app.tray_by_id("main-tray") {
-        tray.set_menu(Some(menu)).map_err(|error| error.to_string())?;
+        tray.set_menu(Some(menu))
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
