@@ -95,6 +95,23 @@ fn parse_platform_url(platform_url: &str) -> Result<Url, String> {
         .map_err(|e| format!("Invalid platform URL: {e}"))
 }
 
+#[cfg(target_os = "linux")]
+fn web_user_agent_for_mode(mode: &str) -> Option<String> {
+    match mode {
+        "desktop" => Some(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+                .to_string(),
+        ),
+        "mobile" => Some(
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 fn webview_bounds(
     window: &tauri::Window,
     sidebar_width: u32,
@@ -245,6 +262,7 @@ fn install_or_update_gtk_webview(
     app: &AppHandle,
     url: String,
     private_mode: bool,
+    user_agent_mode: String,
     x: f64,
     y: f64,
     width: f64,
@@ -415,6 +433,10 @@ fn install_or_update_gtk_webview(
                 .webview
                 .as_ref()
                 .ok_or_else(|| "GTK webview not initialized".to_string())?;
+
+            if let Some(settings) = WebViewExt::settings(webview) {
+                settings.set_user_agent(web_user_agent_for_mode(&user_agent_mode).as_deref());
+            }
 
             webview.set_margin_start(x);
             webview.set_margin_top(y);
@@ -621,6 +643,7 @@ pub async fn open_web_platform(
     app: AppHandle,
     platform_url: String,
     private_mode: bool,
+    user_agent_mode: Option<String>,
     sidebar_width: u32,
     toolbar_height: u32,
 ) -> Result<(), String> {
@@ -639,6 +662,7 @@ pub async fn open_web_platform(
             &app,
             platform_url,
             private_mode,
+            user_agent_mode.unwrap_or_else(|| "desktop".to_string()),
             position.x,
             position.y,
             size.width,
@@ -657,6 +681,7 @@ pub async fn open_web_platform_in_rect(
     app: AppHandle,
     platform_url: String,
     private_mode: bool,
+    user_agent_mode: Option<String>,
     x: f64,
     y: f64,
     width: f64,
@@ -666,7 +691,16 @@ pub async fn open_web_platform_in_rect(
 
     #[cfg(target_os = "linux")]
     {
-        install_or_update_gtk_webview(&app, platform_url, private_mode, x, y, width, height)
+        install_or_update_gtk_webview(
+            &app,
+            platform_url,
+            private_mode,
+            user_agent_mode.unwrap_or_else(|| "desktop".to_string()),
+            x,
+            y,
+            width,
+            height,
+        )
     }
 
     #[cfg(not(target_os = "linux"))]

@@ -15,7 +15,7 @@ export const WEB_PLATFORM_TOOLBAR_HEIGHT = 53;
 export const WEB_TOOLBAR_HEIGHT = WEB_TITLEBAR_HEIGHT + WEB_PLATFORM_TOOLBAR_HEIGHT;
 
 export const platforms: WebPlatform[] = [
-  { id: "youtube", name: "YouTube", url: "https://youtube.com", icon: "youtube.svg" },
+  { id: "youtube", name: "YouTube", url: "https://www.youtube.com", icon: "youtube.svg" },
   { id: "ytmusic", name: "YouTube Music", url: "https://music.youtube.com", icon: "ytmusic.svg" },
   { id: "spotify", name: "Spotify", url: "https://open.spotify.com", icon: "spotify.svg" },
   { id: "deezer", name: "Deezer", url: "https://deezer.com", icon: "deezer.svg" },
@@ -69,6 +69,7 @@ export async function openPlatform(url: string) {
   await invoke("open_web_platform_in_rect", {
     platformUrl: url,
     privateMode: settings.privateMode || !settings.persistentSession,
+    userAgentMode: settings.userAgentMode,
     x: bounds.x,
     y: bounds.y,
     width: bounds.width,
