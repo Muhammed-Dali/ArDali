@@ -146,6 +146,8 @@ Rust kontrolü:
 npm run check:rust
 ```
 
+Katkı vermek isteyen geliştiriciler için branch, test ve pull request akışı `CONTRIBUTING.md` dosyasında açıklanır.
+
 ## Komutlar
 
 | Komut | Açıklama |

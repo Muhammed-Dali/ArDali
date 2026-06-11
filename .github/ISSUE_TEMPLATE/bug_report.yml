@@ -1,0 +1,74 @@
+name: Bug report
+description: Report something that is broken or not working as expected.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Clear steps and system details help us fix it faster.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+      placeholder: YouTube stays on loading placeholders, projectM button does not open, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ArDali
+        2. Go to Web
+        3. Click YouTube
+        4. See loading placeholders
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation method
+      options:
+        - AUR ardali-bin
+        - GitHub AppImage
+        - GitHub deb/rpm
+        - Built from source
+        - Development mode
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ArDali version
+      placeholder: "4.1.3"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      placeholder: "Arch Linux, KDE Plasma, Wayland/X11"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Paste relevant logs or attach screenshots. Remove tokens, cookies, or private data first.
+      render: text
+
