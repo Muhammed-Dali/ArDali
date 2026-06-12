@@ -14,6 +14,23 @@ use webkit2gtk::{
     WebsiteDataManager, WebsiteDataManagerExt, WebsiteDataManagerExtManual, WebsiteDataTypes,
 };
 
+// ── Windows imports ──────────────────────────────────────────────────────────
+#[cfg(target_os = "windows")]
+use std::sync::{Arc, Mutex};
+#[cfg(target_os = "windows")]
+use tauri::WebviewWindowBuilder;
+
+// ── Windows global state ─────────────────────────────────────────────────────
+#[cfg(target_os = "windows")]
+static WIN_WEBVIEW: std::sync::OnceLock<Mutex<Option<tauri::WebviewWindow>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn win_webview_state() -> &'static Mutex<Option<tauri::WebviewWindow>> {
+    WIN_WEBVIEW.get_or_init(|| Mutex::new(None))
+}
+
+// ── Linux GTK state ──────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 struct GtkWebState {
     overlay: gtk::Overlay,
@@ -112,6 +129,19 @@ fn web_user_agent_for_mode(mode: &str) -> Option<String> {
     }
 }
 
+// Windows user-agent — Chrome tabanlı, DRM uyumlu
+#[cfg(target_os = "windows")]
+fn win_user_agent_for_mode(mode: &str) -> String {
+    match mode {
+        "mobile" => "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 \
+                     (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            .to_string(),
+        _ => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+              (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            .to_string(),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn apply_web_compat_settings(settings: &webkit2gtk::Settings) {
     settings.set_enable_javascript(true);
@@ -132,6 +162,37 @@ fn apply_web_compat_settings(settings: &webkit2gtk::Settings) {
     settings.set_media_playback_requires_user_gesture(false);
     settings.set_media_playback_allows_inline(true);
     settings.set_enable_write_console_messages_to_stdout(true);
+}
+
+// ── Linux: Widevine CDM yolunu WebContext'e ekle ─────────────────────────────
+#[cfg(target_os = "linux")]
+fn try_set_widevine_path(ctx: &WebContext) {
+    // Yaygın Widevine CDM konumları — önce Chrome, sonra Chromium, sonra sistemdeki
+    let candidates = [
+        "/opt/google/chrome/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
+        "/usr/lib/chromium/libwidevinecdm.so",
+        "/usr/lib/chromium-browser/libwidevinecdm.so",
+        "/usr/lib64/chromium/libwidevinecdm.so",
+        "/snap/chromium/current/usr/lib/chromium-browser/libwidevinecdm.so",
+    ];
+    for path in &candidates {
+        if std::path::Path::new(path).exists() {
+            // webkit2gtk 4.1 API
+            #[cfg(feature = "webkit2gtk-4_1")]
+            {
+                use webkit2gtk::WebContextExt;
+                ctx.set_web_extensions_directory(
+                    std::path::Path::new(path)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or("/usr/lib/chromium"),
+                );
+            }
+            eprintln!("[widevine] CDM bulundu: {path}");
+            return;
+        }
+    }
+    eprintln!("[widevine] CDM bulunamadi — DRM icerigi calismayabilir");
 }
 
 fn webview_bounds(
@@ -360,9 +421,13 @@ fn install_or_update_gtk_webview(
                         cookie_manager
                             .set_persistent_storage(&cookie_file, CookiePersistentStorage::Sqlite);
                     }
-                    WebContext::with_website_data_manager(&data_manager)
+                    let ctx = WebContext::with_website_data_manager(&data_manager);
+                    try_set_widevine_path(&ctx);
+                    ctx
                 } else {
-                    WebContext::new_ephemeral()
+                    let ctx = WebContext::new_ephemeral();
+                    try_set_widevine_path(&ctx);
+                    ctx
                 };
                 let webview = webkit2gtk::WebView::with_context(&web_context);
                 if let Some(settings) = WebViewExt::settings(&webview) {
@@ -687,6 +752,172 @@ fn clear_gtk_web_data(app: &AppHandle, target: String) -> Result<(), String> {
     })
 }
 
+// ── Windows: WebviewWindow yönetimi ─────────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+fn install_or_update_win_webview(
+    app: &AppHandle,
+    url: String,
+    _private_mode: bool,
+    user_agent_mode: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let state = win_webview_state();
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    let user_agent = win_user_agent_for_mode(&user_agent_mode);
+
+    if let Some(existing) = guard.as_ref() {
+        // Varsa konumunu güncelle ve URL'i değiştir
+        existing
+            .set_position(tauri::LogicalPosition::new(x, y).into())
+            .map_err(|e| e.to_string())?;
+        existing
+            .set_size(tauri::LogicalSize::new(width.max(1.0), height.max(1.0)).into())
+            .map_err(|e| e.to_string())?;
+        existing.show().map_err(|e| e.to_string())?;
+        existing.set_focus().map_err(|e| e.to_string())?;
+
+        // JS ile URL değiştir
+        let navigate_script = format!("window.location.href = {};", serde_json::json!(url));
+        let _ = existing.eval(&navigate_script);
+        return Ok(());
+    }
+
+    // Ana pencereyi bul — WebviewWindow ona göre konumlanacak
+    let main_window = app
+        .get_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+    let main_pos = main_window
+        .outer_position()
+        .map_err(|e| e.to_string())?;
+    let scale = main_window.scale_factor().unwrap_or(1.0);
+    let main_x = main_pos.x as f64 / scale;
+    let main_y = main_pos.y as f64 / scale;
+
+    let abs_x = main_x + x;
+    let abs_y = main_y + y;
+
+    let webview_window = WebviewWindowBuilder::new(
+        app,
+        "ardali-web-platform",
+        tauri::WebviewUrl::External(url.parse::<tauri::Url>().map_err(|e| format!("URL parse hatasi: {e}"))?),
+    )
+    .title("ArDali Web")
+    .decorations(false)
+    .resizable(true)
+    .position(abs_x, abs_y)
+    .inner_size(width.max(1.0), height.max(1.0))
+    .user_agent(&user_agent)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    webview_window.show().map_err(|e| e.to_string())?;
+    webview_window.set_focus().map_err(|e| e.to_string())?;
+
+    *guard = Some(webview_window);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn update_win_webview_bounds(
+    app: &AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let main_window = app
+        .get_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+    let main_pos = main_window
+        .outer_position()
+        .map_err(|e| e.to_string())?;
+    let scale = main_window.scale_factor().unwrap_or(1.0);
+    let main_x = main_pos.x as f64 / scale;
+    let main_y = main_pos.y as f64 / scale;
+
+    let state = win_webview_state();
+    let guard = state.lock().map_err(|e| e.to_string())?;
+    if let Some(webview) = guard.as_ref() {
+        webview
+            .set_position(tauri::LogicalPosition::new(main_x + x, main_y + y).into())
+            .map_err(|e| e.to_string())?;
+        webview
+            .set_size(tauri::LogicalSize::new(width.max(1.0), height.max(1.0)).into())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn destroy_win_webview(_app: &AppHandle) -> Result<(), String> {
+    let state = win_webview_state();
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    if let Some(webview) = guard.take() {
+        let _ = webview.close();
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn park_win_webview(_app: &AppHandle) -> Result<(), String> {
+    let state = win_webview_state();
+    let guard = state.lock().map_err(|e| e.to_string())?;
+    if let Some(webview) = guard.as_ref() {
+        webview.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn navigate_win_web_history(_app: &AppHandle, direction: &str) -> Result<(), String> {
+    let state = win_webview_state();
+    let guard = state.lock().map_err(|e| e.to_string())?;
+    if let Some(webview) = guard.as_ref() {
+        let script = match direction {
+            "back" => "history.back();",
+            "forward" => "history.forward();",
+            _ => return Ok(()),
+        };
+        webview.eval(script).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn run_win_javascript(_app: &AppHandle, script: String) -> Result<String, String> {
+    let state = win_webview_state();
+    let guard = state.lock().map_err(|e| e.to_string())?;
+    if let Some(webview) = guard.as_ref() {
+        webview.eval(&script).map_err(|e| e.to_string())?;
+        Ok("ok".to_string())
+    } else {
+        Err("Windows webview mevcut degil".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn clear_win_web_data(_app: &AppHandle, _target: String) -> Result<(), String> {
+    // WebView2 veri temizleme — şimdilik webview'ı yeniden oluşturarak temizle
+    let state = win_webview_state();
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    if let Some(webview) = guard.as_ref() {
+        // Çerezleri ve localStorage'ı JS ile temizle
+        let _ = webview.eval(
+            r#"
+            try { localStorage.clear(); } catch(_) {}
+            try { sessionStorage.clear(); } catch(_) {}
+            "#,
+        );
+    }
+    Ok(())
+}
+
+// ── Tauri komutları ──────────────────────────────────────────────────────────
+
 #[tauri::command]
 pub async fn open_web_platform(
     app: AppHandle,
@@ -719,9 +950,23 @@ pub async fn open_web_platform(
         )
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        install_or_update_win_webview(
+            &app,
+            platform_url,
+            private_mode,
+            user_agent_mode.unwrap_or_else(|| "desktop".to_string()),
+            position.x,
+            position.y,
+            size.width,
+            size.height,
+        )
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
 
@@ -752,9 +997,23 @@ pub async fn open_web_platform_in_rect(
         )
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        install_or_update_win_webview(
+            &app,
+            platform_url,
+            private_mode,
+            user_agent_mode.unwrap_or_else(|| "desktop".to_string()),
+            x,
+            y,
+            width,
+            height,
+        )
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
 
@@ -765,9 +1024,14 @@ pub async fn hide_web_view(app: AppHandle) -> Result<(), String> {
         destroy_gtk_webview(&app)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        destroy_win_webview(&app)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
 
@@ -778,9 +1042,14 @@ pub async fn park_web_view(app: AppHandle) -> Result<(), String> {
         park_gtk_webview(&app)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        park_win_webview(&app)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
 
@@ -791,9 +1060,14 @@ pub async fn navigate_web_history(app: AppHandle, direction: String) -> Result<(
         navigate_gtk_web_history(&app, &direction)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        navigate_win_web_history(&app, &direction)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
 
@@ -827,10 +1101,20 @@ pub async fn apply_web_dali_script(app: AppHandle, script: String) -> Result<(),
         })
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        let state = win_webview_state();
+        let guard = state.lock().map_err(|e| e.to_string())?;
+        if let Some(webview) = guard.as_ref() {
+            webview.eval(&script).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = script;
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
 
@@ -865,11 +1149,16 @@ pub async fn web_dali_audio_snapshot(
         run_web_javascript_string(&app, script)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        run_win_javascript(&app, script)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = app;
         let _ = script;
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
 
@@ -880,9 +1169,14 @@ pub async fn clear_web_data(app: AppHandle, target: String) -> Result<(), String
         clear_gtk_web_data(&app, target)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        clear_win_web_data(&app, target)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
 
@@ -905,9 +1199,14 @@ pub async fn update_webview_bounds(
         update_gtk_webview_bounds(&app, position.x, position.y, size.width, size.height)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        update_win_webview_bounds(&app, position.x, position.y, size.width, size.height)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
 
@@ -924,8 +1223,13 @@ pub async fn update_webview_bounds_rect(
         update_gtk_webview_bounds(&app, x, y, width, height)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        Err("Embedded web view is currently implemented for Linux only".to_string())
+        update_win_webview_bounds(&app, x, y, width, height)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
     }
 }
