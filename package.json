@@ -1,6 +1,6 @@
 {
-  "name": "ardali-webmedia-tauri",
-  "version": "4.1.8",
+  "name": "ardali-webmedia",
+  "version": "4.1.9",
   "private": true,
   "type": "module",
   "scripts": {

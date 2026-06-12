@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ArDali WebMedia",
-  "version": "4.1.8",
+  "version": "4.1.9",
   "identifier": "com.ardali.webmedia",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run visualizer:build && npm run frontend:build",
+    "beforeBuildCommand": "npm run visualizer:build && npm run frontend:build && cp src-tauri/vendor/bass/linux/libbass.so native-dist/linux/ || true",
     "frontendDist": "../dist"
   },
   "app": {
@@ -35,6 +35,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "Network",
     "icon": ["icons/ardali_256.png"],
     "linux": {
       "deb": {

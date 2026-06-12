@@ -5,6 +5,8 @@ fn main() {
         println!("cargo:rustc-link-search=native={manifest_dir}/vendor/bass/linux");
         println!("cargo:rustc-link-lib=dylib=bass");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{manifest_dir}/vendor/bass/linux");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/ardali-webmedia/_up_/native-dist/linux");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/ArDali WebMedia/_up_/native-dist/linux");
         println!("cargo:rerun-if-changed=native/ardali_dsp.cpp");
 
         cc::Build::new()
