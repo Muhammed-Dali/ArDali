@@ -34,7 +34,7 @@
   },
   "bundle": {
     "active": true,
-    "category": "Network",
+    "category": "AudioVideo",
     "targets": "all",
     "icon": ["icons/ardali_256.png"],
     "linux": {
