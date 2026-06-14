@@ -43,7 +43,10 @@ jobs:
             libwayland-dev \
             libx11-dev \
             libgl1-mesa-dev \
-            libglu1-mesa-dev
+            libglu1-mesa-dev \
+            libasound2-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -73,6 +76,7 @@ jobs:
           cmake --build "$RUNNER_TEMP/projectm-build" --parallel
           cmake --install "$RUNNER_TEMP/projectm-build"
           {
+            echo "PROJECTM_PREFIX=$PROJECTM_PREFIX"
             echo "CMAKE_PREFIX_PATH=$PROJECTM_PREFIX:$CMAKE_PREFIX_PATH"
             echo "PKG_CONFIG_PATH=$PROJECTM_PREFIX/lib/pkgconfig:$PROJECTM_PREFIX/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH"
             echo "LD_LIBRARY_PATH=$PROJECTM_PREFIX/lib:$PROJECTM_PREFIX/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
