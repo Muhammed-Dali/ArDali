@@ -6,6 +6,7 @@ build-visualizer-ardali/
 build-visualizer/
 src-tauri/target/
 src-tauri/gen/
+dali-visualizer/target/
 *.log
 .DS_Store
 .vscode/

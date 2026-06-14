@@ -116,8 +116,8 @@ fn parse_platform_url(platform_url: &str) -> Result<Url, String> {
 fn web_user_agent_for_mode(mode: &str) -> Option<String> {
     match mode {
         "desktop" => Some(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 \
-             (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 .to_string(),
         ),
         "mobile" => Some(
@@ -144,6 +144,8 @@ fn win_user_agent_for_mode(mode: &str) -> String {
 
 #[cfg(target_os = "linux")]
 fn apply_web_compat_settings(settings: &webkit2gtk::Settings) {
+    settings.set_enable_webaudio(true);
+    settings.set_disable_web_security(true);
     settings.set_enable_javascript(true);
     settings.set_enable_javascript_markup(true);
     settings.set_enable_fullscreen(true);
@@ -1014,6 +1016,44 @@ pub async fn open_web_platform_in_rect(
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         Err("Embedded web view is currently implemented for Linux and Windows only".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn get_current_webview_url(app: AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::mpsc;
+        use tauri::Manager;
+        let window = app.get_webview_window("main").ok_or_else(|| "No main window".to_string())?;
+        let (tx, rx) = mpsc::channel();
+        window.run_on_main_thread(move || {
+            GTK_WEB_STATE.with(|state| {
+                if let Some(webview) = state.borrow().as_ref().and_then(|s| s.webview.clone()) {
+                    use webkit2gtk::WebViewExt;
+                    let uri = webview.uri().map(|g| g.to_string()).unwrap_or_default();
+                    let _ = tx.send(Ok(uri));
+                } else {
+                    let _ = tx.send(Err("GTK webview not found".to_string()));
+                }
+            });
+        }).map_err(|e| e.to_string())?;
+        
+        rx.recv().unwrap_or_else(|_| Err("Channel error".to_string()))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(webview) = win_webview_lock().lock().unwrap().as_ref() {
+            Ok(webview.url().unwrap().to_string())
+        } else {
+            Err("Windows webview not found".to_string())
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Not implemented".to_string())
     }
 }
 

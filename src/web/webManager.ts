@@ -116,6 +116,17 @@ try {
     if (!AudioContextCtor) return { ok: false, error: "audio-context-unavailable" };
     root.context = new AudioContextCtor({ latencyHint: "interactive" });
   }
+  if (!root.gestureListenersRegistered) {
+    root.gestureListenersRegistered = true;
+    const resumeCtx = () => {
+      if (root.context && root.context.state === "suspended") {
+        root.context.resume().catch(() => {});
+      }
+    };
+    ["click", "pointerdown", "keydown", "touchstart"].forEach((event) => {
+      document.addEventListener(event, resumeCtx, { capture: true, passive: true });
+    });
+  }
   window.__ARDALI_DALI_WEB__ = root;
 
   const context = root.context;
@@ -184,6 +195,7 @@ try {
   const makeGraph = (media) => {
     const existing = root.graphs.get(media);
     if (existing) return existing;
+    if (!cfg.enabled) return null;
     const source = context.createMediaElementSource(media);
     const daliInput = context.createGain();
     const daliOutput = context.createGain();
@@ -498,7 +510,7 @@ try {
       master,
       rawAnalyser,
       analyser,
-      warmedUp: false,
+      warmUpUntil: 0,
     };
     root.graphs.set(media, graph);
     return graph;
@@ -633,14 +645,18 @@ try {
     graph.width.gain.setTargetAtTime(centerLift * surroundLift, now, 0.018);
     if (graph.panner) graph.panner.pan.setTargetAtTime(enabled ? clamp(dsp.balance, -100, 100, 0) / 100 : 0, now, 0.018);
     const mediaVolume = graph.media?.muted ? 0 : clamp(graph.media?.volume, 0, 1, 1);
-    if (!graph.warmedUp) {
-      graph.warmedUp = true;
+    if (!graph.warmUpUntil) {
+      // First time: fade in from 0 to avoid click/pop; protect for 300 ms
+      const rampDuration = 0.3;
+      graph.warmUpUntil = now + rampDuration + 0.05;
       graph.master.gain.cancelScheduledValues(now);
       graph.master.gain.setValueAtTime(0, now);
-      graph.master.gain.linearRampToValueAtTime(mediaVolume, now + 0.08);
-    } else {
-      graph.master.gain.setTargetAtTime(mediaVolume, now, 0.018);
+      graph.master.gain.linearRampToValueAtTime(mediaVolume, now + rampDuration);
+    } else if (now >= graph.warmUpUntil) {
+      // Ramp finished — smooth parameter update
+      graph.master.gain.setTargetAtTime(mediaVolume, now, 0.025);
     }
+    // else: ramp still in progress, do NOT touch master gain
   };
 
   const allMediaElements = Array.from(document.querySelectorAll("video, audio"));
@@ -668,8 +684,10 @@ try {
   for (const media of mediaElements) {
     try {
       const graph = makeGraph(media);
-      applyGraph(graph);
-      connected += 1;
+      if (graph) {
+        applyGraph(graph);
+        connected += 1;
+      }
     } catch (error) {
       if (!root.lastError) root.lastError = String(error && error.message ? error.message : error);
     }
@@ -684,7 +702,7 @@ try {
     root.mediaEventListeners.add(media);
     const refresh = () => {
       clearTimeout(root.mediaEventTimer);
-      root.mediaEventTimer = setTimeout(() => root.applyCurrent && root.applyCurrent(), 35);
+      root.mediaEventTimer = setTimeout(() => root.applyCurrent && root.applyCurrent(), 100);
     };
     ["loadedmetadata", "loadeddata", "canplay", "play", "playing", "volumechange"].forEach((eventName) => {
       media.addEventListener(eventName, refresh, { passive: true });
@@ -698,16 +716,29 @@ try {
     for (const media of selectMediaElements(currentMedia)) {
       try {
         const graph = makeGraph(media);
-        applyGraph(graph);
-        count += 1;
+        if (graph) {
+          applyGraph(graph);
+          count += 1;
+        }
       } catch (_) {}
     }
     return count;
   };
   if (!root.observer) {
     root.observer = new MutationObserver(() => {
+      const currentMedia = Array.from(document.querySelectorAll("video, audio"));
+      let hasNew = false;
+      currentMedia.forEach((media) => {
+        if (media && !root.mediaEventListeners.has(media)) {
+          bindMediaEvents(media);
+          hasNew = true;
+        }
+      });
+      if (hasNew) {
+        root.applyCurrent && root.applyCurrent();
+      }
       clearTimeout(root.observerTimer);
-      root.observerTimer = setTimeout(() => root.applyCurrent && root.applyCurrent(), 120);
+      root.observerTimer = setTimeout(() => root.applyCurrent && root.applyCurrent(), 180);
     });
     root.observer.observe(document.documentElement, { childList: true, subtree: true });
   }

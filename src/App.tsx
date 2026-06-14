@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CircleHelp,
   Clock3,
+  Download,
   Film,
   FolderPlus,
   Globe2,
@@ -3177,15 +3178,7 @@ function SettingsWindow() {
 
   return (
     <main className="settings-window">
-      <header className="settings-window-header" data-tauri-drag-region>
-        <div className="settings-title">
-          <SlidersHorizontal size={19} />
-          <span>{text("settings.title")}</span>
-        </div>
-        <button className="settings-close-btn" onClick={() => void closeWindow()} title={text("common.close")} aria-label={text("common.close")}>
-          <X size={18} />
-        </button>
-      </header>
+
 
       <nav className="settings-tabs" aria-label={text("settings.aria")}>
         {settingsTabs.map((tab) => (
@@ -3920,6 +3913,9 @@ export function App() {
   const [musicViewMenuOpen, setMusicViewMenuOpen] = useState(false);
   const [webSettings, setWebSettings] = useState<WebSettings>(() => loadWebSettings());
   const [activeWebPlatformId, setActiveWebPlatformId] = useState(platforms[0]?.id ?? "");
+  const [platformsCollapsed, setPlatformsCollapsed] = useState(() => {
+    return localStorage.getItem("ardali_platforms_collapsed") === "true";
+  });
   const [storeItems, setStoreItems] = useState<ArdaliStoreItem[]>([]);
   const [storeStatus, setStoreStatus] = useState("");
   const [webRuntimeStatus, setWebRuntimeStatus] = useState("");
@@ -3931,6 +3927,7 @@ export function App() {
   const webFullscreenRef = useRef(false);
   const windowFocusedRef = useRef(true);
   const auxiliaryWindowFocusedRef = useRef(false);
+  const webChromeHiddenTargetRef = useRef<boolean | null>(null);
   const lastAudibleVolumeRef = useRef(0.37);
   const text = useCallback((key: string) => tr(webSettings.language, key), [webSettings.language]);
 
@@ -4981,6 +4978,63 @@ export function App() {
     [ensureAudioGraph],
   );
 
+  const openDownloaderWindow = useCallback(async () => {
+    if (!isTauriRuntime()) {
+      window.open("/downloader/index.html", "ardali-downloader", "width=1000,height=700");
+      return;
+    }
+
+    try {
+      let urlToPass = "";
+      if (page === "web") {
+        try {
+          const currentUrl = await invoke<string>("get_current_webview_url");
+          urlToPass = currentUrl;
+        } catch (e) {
+          console.warn("Failed to get webview url:", e);
+          const platform = platforms.find((p) => p.id === activeWebPlatformId);
+          if (platform) urlToPass = platform.url;
+        }
+        if (!urlToPass) {
+          urlToPass = "https://www.youtube.com";
+        }
+      } else if (page === "music" && selectedTrackData) {
+        urlToPass = selectedTrackData.url || "";
+      } else if (page === "video" && selectedVideoData) {
+        urlToPass = selectedVideoData.url || "";
+      }
+
+      const existing = await WebviewWindow.getByLabel("downloader");
+      if (existing) {
+        await existing.unminimize();
+        await existing.show();
+        await existing.setFocus();
+        if (urlToPass) {
+          await existing.emit("download-url", urlToPass);
+        }
+        return;
+      }
+
+      const cacheBuster = `cb=${Date.now()}`;
+      const urlQuery = urlToPass ? `url=${encodeURIComponent(urlToPass)}&${cacheBuster}` : cacheBuster;
+      const downloaderUrl = `/downloader/index.html?${urlQuery}`;
+
+      const downloaderWin = new WebviewWindow("downloader", {
+        url: downloaderUrl,
+        title: "ArDali Dawlod",
+        width: 1000,
+        height: 700,
+        minWidth: 800,
+        minHeight: 600,
+        resizable: true,
+        decorations: true,
+        center: true,
+      });
+    } catch (err) {
+      console.error("Failed to open downloader", err);
+    }
+  }, [page, activeWebPlatformId, selectedTrackData, selectedVideoData]);
+
   const openSoundEffectsWindow = useCallback(async () => {
     const scope = page === "video" ? "video" : page === "web" ? "web" : "music";
     const url = `/?view=sound-effects&scope=${scope}`;
@@ -5005,7 +5059,7 @@ export function App() {
         minWidth: 860,
         minHeight: 560,
         resizable: true,
-        decorations: false,
+        decorations: true,
         center: true,
         visible: true,
       });
@@ -5062,7 +5116,7 @@ export function App() {
         minWidth: 900,
         minHeight: 620,
         resizable: true,
-        decorations: false,
+        decorations: true,
         center: true,
         visible: true,
       });
@@ -5645,6 +5699,7 @@ export function App() {
         webChromeBoundsTimerRef.current = null;
       }
       setWebChromeHidden(false);
+      webChromeHiddenTargetRef.current = false;
       return;
     }
 
@@ -5658,6 +5713,7 @@ export function App() {
         webChromeBoundsTimerRef.current = null;
       }
       setWebChromeHidden(false);
+      webChromeHiddenTargetRef.current = false;
       void setWebChromeVisibility(false).catch((error) => reportClientError("web.chrome-visible", error));
       return;
     }
@@ -5674,6 +5730,9 @@ export function App() {
 
     const applyHidden = (hidden: boolean) => {
       if (disposed) return;
+      if (webChromeHiddenTargetRef.current === hidden) return;
+      webChromeHiddenTargetRef.current = hidden;
+
       clearBoundsTimer();
 
       if (hidden) {
@@ -5697,7 +5756,7 @@ export function App() {
     };
 
     const refreshAuxiliaryFocus = async () => {
-      const labels = ["sound-effects", "settings", "eq-presets"];
+      const labels = ["downloader", "sound-effects", "settings", "eq-presets"];
       for (const label of labels) {
         try {
           const webview = await WebviewWindow.getByLabel(label);
@@ -5773,6 +5832,7 @@ export function App() {
       }
       clearBoundsTimer();
       setWebChromeHidden(false);
+      webChromeHiddenTargetRef.current = false;
       void setWebChromeVisibility(false).catch((error) => reportClientError("web.chrome-cleanup", error));
     };
   }, [libraryLoaded, page, webSettings.autoHideChrome, webSettings.chromeAutoHideDelayMs, webSettings.lowPowerMode, webSettings.motionPreset]);
@@ -7185,58 +7245,73 @@ export function App() {
         }}
       />
 
-      <header className="window-titlebar" data-tauri-drag-region>
-        <span data-tauri-drag-region>{text("app.title")}</span>
-        <div className="window-controls">
-          <button onPointerDown={stopMainWindowButtonDrag} onClick={() => void handleMainWindowAction("minimize")} title={text("window.minimize")} aria-label={text("window.minimize")}>-</button>
-          <button onPointerDown={stopMainWindowButtonDrag} onClick={() => void handleMainWindowAction("maximize")} title={text("window.maximize")} aria-label={text("window.maximize")}>⌃</button>
-          <button onPointerDown={stopMainWindowButtonDrag} onClick={() => void handleMainWindowAction("close")} title={text("common.close")} aria-label={text("common.close")}>×</button>
-        </div>
-      </header>
-      <div className="main-window-resize-grip main-window-resize-n" onMouseDown={(event) => handleMainResizeMouseDown(event, "North")} />
-      <div className="main-window-resize-grip main-window-resize-e" onMouseDown={(event) => handleMainResizeMouseDown(event, "East")} />
-      <div className="main-window-resize-grip main-window-resize-s" onMouseDown={(event) => handleMainResizeMouseDown(event, "South")} />
-      <div className="main-window-resize-grip main-window-resize-w" onMouseDown={(event) => handleMainResizeMouseDown(event, "West")} />
-      <div className="main-window-resize-grip main-window-resize-ne" onMouseDown={(event) => handleMainResizeMouseDown(event, "NorthEast")} />
-      <div className="main-window-resize-grip main-window-resize-nw" onMouseDown={(event) => handleMainResizeMouseDown(event, "NorthWest")} />
-      <div className="main-window-resize-grip main-window-resize-se" onMouseDown={(event) => handleMainResizeMouseDown(event, "SouthEast")} />
-      <div className="main-window-resize-grip main-window-resize-sw" onMouseDown={(event) => handleMainResizeMouseDown(event, "SouthWest")} />
-      <div className="main-window-resize-cue" aria-hidden="true" />
+
 
       <nav className="rail" aria-label={text("settings.aria")}>
         <div className="rail-stack">
-          {railItems.map((item) => {
-            if (item.id === "web" && !webSettings.enabled) return null;
-            const active = page === item.id || (item.id === "files" && page === "music");
-            const iconName =
-              item.id === "files"
-                ? "files.svg"
-                : item.id === "video"
-                  ? "video.svg"
-                  : item.id === "music"
-                    ? "music.svg"
-                    : item.id === "gallery"
-                      ? "gallery.svg"
-                      : item.id === "web"
-                        ? "web.svg"
-                        : "";
-            return (
-              <button
-                className={`rail-btn ${active ? "active" : ""}`}
-                data-page={item.id}
-                key={item.id}
-                onClick={() => switchPage(item.id)}
-                title={text(item.labelKey)}
-                aria-label={text(item.labelKey)}
-              >
-                {iconName ? <RailThemeIcon name={iconName} /> : <Settings size={26} strokeWidth={2.1} />}
-              </button>
-            );
-          })}
-          <button className="rail-btn utility" data-page="sound-effects" onClick={openSoundEffectsWindow} title={text("rail.soundEffects")} aria-label={text("rail.soundEffects")}>
+          {webSettings.enabled && (
+            <button
+              className={`rail-btn ${page === "web" ? "active" : ""}`}
+              data-page="web"
+              onClick={() => switchPage("web")}
+              title={text("rail.web")}
+              aria-label={text("rail.web")}
+            >
+              <RailThemeIcon name="web.svg" />
+            </button>
+          )}
+          <button
+            className="rail-btn utility"
+            data-page="downloader"
+            onClick={openDownloaderWindow}
+            title="ArDali Dawlod"
+            aria-label="ArDali Dawlod"
+          >
+            <RailThemeIcon name="download.png" />
+          </button>
+          <button
+            className="rail-btn utility"
+            data-page="sound-effects"
+            onClick={openSoundEffectsWindow}
+            title={text("rail.soundEffects")}
+            aria-label={text("rail.soundEffects")}
+          >
             <RailThemeIcon name="sound-effects.svg" />
           </button>
-          <button className="rail-btn utility" data-page="visualizer" onClick={openProjectMWindow} title={text("rail.visualizer")} aria-label={text("rail.visualizer")}>
+          <button
+            className={`rail-btn ${page === "video" ? "active" : ""}`}
+            data-page="video"
+            onClick={() => switchPage("video")}
+            title={text("rail.video")}
+            aria-label={text("rail.video")}
+          >
+            <RailThemeIcon name="video.svg" />
+          </button>
+          <button
+            className={`rail-btn ${page === "music" || page === "files" ? "active" : ""}`}
+            data-page="music"
+            onClick={() => switchPage("music")}
+            title={text("rail.music")}
+            aria-label={text("rail.music")}
+          >
+            <RailThemeIcon name="music.svg" />
+          </button>
+          <button
+            className={`rail-btn ${page === "gallery" ? "active" : ""}`}
+            data-page="gallery"
+            onClick={() => switchPage("gallery")}
+            title={text("rail.gallery")}
+            aria-label={text("rail.gallery")}
+          >
+            <RailThemeIcon name="gallery.svg" />
+          </button>
+          <button
+            className="rail-btn utility"
+            data-page="visualizer"
+            onClick={openProjectMWindow}
+            title={text("rail.visualizer")}
+            aria-label={text("rail.visualizer")}
+          >
             <RailThemeIcon name="visualizer.svg" />
           </button>
         </div>
@@ -7354,25 +7429,41 @@ export function App() {
                   </button>
                 </div>
               ) : null}
-              <button
-                className={`web-platform-btn web-store-btn ${activeWebPlatformId === ARDALI_STORE_PLATFORM_ID ? "active" : ""}`}
-                onClick={openArdaliStore}
-                title="ArDali Mağaza"
-                aria-label="ArDali Mağaza"
-              >
-                <Store size={21} />
-              </button>
-              {platforms.map((platform) => (
+              <div className={`web-platforms-list ${platformsCollapsed ? "collapsed" : ""}`}>
                 <button
-                  className={`web-platform-btn ${activeWebPlatformId === platform.id ? "active" : ""}`}
-                  key={platform.id}
-                  onClick={() => void handleOpenWebPlatform(platform)}
-                  title={platform.name}
-                  aria-label={platform.name}
+                  className={`web-platform-btn web-store-btn ${activeWebPlatformId === ARDALI_STORE_PLATFORM_ID ? "active" : ""}`}
+                  onClick={openArdaliStore}
+                  title="ArDali Mağaza"
+                  aria-label="ArDali Mağaza"
                 >
-                  <WebPlatformIcon platform={platform} />
+                  <Store size={21} />
                 </button>
-              ))}
+                {platforms.map((platform) => (
+                  <button
+                    className={`web-platform-btn ${activeWebPlatformId === platform.id ? "active" : ""}`}
+                    key={platform.id}
+                    onClick={() => void handleOpenWebPlatform(platform)}
+                    title={platform.name}
+                    aria-label={platform.name}
+                  >
+                    <WebPlatformIcon platform={platform} />
+                  </button>
+                ))}
+              </div>
+              <button
+                className="web-platform-collapse-btn"
+                onClick={() => {
+                  setPlatformsCollapsed((prev) => {
+                    const next = !prev;
+                    localStorage.setItem("ardali_platforms_collapsed", String(next));
+                    return next;
+                  });
+                }}
+                title={platformsCollapsed ? "Platformları Göster" : "Platformları Gizle"}
+                aria-label={platformsCollapsed ? "Platformları Göster" : "Platformları Gizle"}
+              >
+                {platformsCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+              </button>
             </>
           ) : (
           <>
@@ -7942,7 +8033,7 @@ function SoundEffectsWindow() {
       minWidth: 980,
       minHeight: 820,
       resizable: true,
-      decorations: false,
+      decorations: true,
       center: true,
       visible: true,
     });
@@ -7950,14 +8041,7 @@ function SoundEffectsWindow() {
 
   return (
     <main className={`sfx-window sfx-light-${lightsMode}`} data-sfx-lights={lightsMode}>
-      <header className="sfx-titlebar" data-tauri-drag-region>
-        <span data-tauri-drag-region>{windowTitle}</span>
-        <div className="window-controls">
-          <button onClick={() => void windowAction("minimize")} aria-label={text("window.minimize")}>-</button>
-          <button onClick={() => void windowAction("maximize")} aria-label={text("window.maximize")}>⌃</button>
-          <button onClick={() => void windowAction("close")} aria-label={text("common.close")}>×</button>
-        </div>
-      </header>
+
       <header className="sfx-window-header">
         <div className="sfx-header-left">
           <img className="sfx-logo" src="/icons/app/ardali_256.png" alt="ArDali" />
@@ -9574,14 +9658,7 @@ function EqPresetsWindow() {
 
   return (
     <main className="eq-preset-window">
-      <header className="eq-preset-titlebar" data-tauri-drag-region>
-        <span data-tauri-drag-region>{text("eqPresets.windowTitle")}</span>
-        <div className="window-controls">
-          <button onClick={() => void windowAction("minimize")} aria-label={text("window.minimize")}>-</button>
-          <button onClick={() => void windowAction("maximize")} aria-label={text("window.maximize")}>⌃</button>
-          <button onClick={() => void windowAction("close")} aria-label={text("common.close")}>×</button>
-        </div>
-      </header>
+
       <header className="eq-preset-heading">
         <h1>{text("eqPresets.title")}</h1>
       </header>
@@ -9771,23 +9848,6 @@ function ProjectMWindow() {
 
   return (
     <main className="projectm-window">
-      <header className="projectm-titlebar">
-        <div>
-          <strong>ArDali Gorseller</strong>
-          <span>{nativeStatus} • Milkdrop presetleri: {presets.length}</span>
-        </div>
-        <div className="projectm-window-actions">
-          <button onClick={() => void startNativeProjectM()} title="Native ProjectM baslat">
-            PM
-          </button>
-          <button onClick={() => void stopNativeProjectM()} title="Native ProjectM durdur">
-            ■
-          </button>
-          <button onClick={() => void windowAction("minimize")}>-</button>
-          <button onClick={() => void windowAction("maximize")}>□</button>
-          <button onClick={() => void windowAction("close")}>x</button>
-        </div>
-      </header>
       <section className="projectm-stage">
         <canvas ref={canvasRef} />
         <div className="projectm-overlay">
@@ -9797,6 +9857,8 @@ function ProjectMWindow() {
       </section>
       <aside className="projectm-presets">
         <div className="projectm-controls">
+          <button onClick={() => void startNativeProjectM()} title="Native PM Başlat" style={{marginRight:'4px', padding:'0 8px', fontWeight:'bold'}}>PM</button>
+          <button onClick={() => void stopNativeProjectM()} title="Native PM Durdur" style={{marginRight:'8px', padding:'0 8px'}}>■</button>
           <input placeholder="Preset ara..." />
           <button onClick={() => setCompact((value) => !value)}>{compact ? "Kompakt" : "Genis"}</button>
           <label>

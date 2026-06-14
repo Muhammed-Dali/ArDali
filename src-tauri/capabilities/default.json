@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Main window permissions for ArDali WebMedia.",
-  "windows": ["main", "sound-effects", "projectm-visualizer", "eq-presets", "settings"],
+  "windows": ["main", "sound-effects", "projectm-visualizer", "eq-presets", "settings", "downloader"],
   "permissions": [
     "core:default",
     "core:webview:allow-create-webview-window",

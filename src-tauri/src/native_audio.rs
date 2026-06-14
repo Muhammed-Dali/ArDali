@@ -2026,43 +2026,64 @@ fn apply_projectm_visual_gain(samples: &mut [f32]) {
 
 unsafe extern "C" fn dsp_callback(
     _handle: HDsp,
-    _channel: Dword,
+    channel: Dword,
     buffer: *mut c_void,
     length: Dword,
     user: *mut c_void,
 ) {
-    if user.is_null() || buffer.is_null() {
+    if user.is_null() || buffer.is_null() || length == 0 {
         return;
     }
     let engine = &mut *(user as *mut NativeAudioEngine);
-    let frames = (length as usize / std::mem::size_of::<f32>() / 2) as c_int;
+    
+    let mut info = BassChannelInfo::default();
+    unsafe { BASS_ChannelGetInfo(channel, &mut info); }
+    let chans = if info.chans > 0 { info.chans as usize } else { 2 };
+    
+    let frames = (length as usize / std::mem::size_of::<f32>() / chans) as c_int;
     if frames <= 0 {
         return;
     }
 
-    let raw_samples = std::slice::from_raw_parts(buffer as *const f32, frames as usize * 2);
-    engine.update_visual_spectrum(raw_samples, true);
+    let raw_floats = std::slice::from_raw_parts(buffer as *const f32, frames as usize * chans);
+    
+    // We need to convert it to stereo for the visualizer to avoid out-of-bounds
+    let mut stereo_samples = vec![0.0f32; frames as usize * 2];
+    for i in 0..(frames as usize) {
+        let left = raw_floats[i * chans];
+        let right = if chans > 1 { raw_floats[i * chans + 1] } else { left };
+        stereo_samples[i * 2] = left;
+        stereo_samples[i * 2 + 1] = right;
+    }
+
+    engine.update_visual_spectrum(&stereo_samples, true);
 
     let Ok(_callback_guard) = CALLBACK_LOCK.try_lock() else {
         if engine.effects_enabled {
-            let samples = std::slice::from_raw_parts_mut(buffer as *mut f32, frames as usize * 2);
+            let samples = std::slice::from_raw_parts_mut(buffer as *mut f32, frames as usize * chans);
             samples.fill(0.0);
-            engine.update_visual_spectrum(samples, false);
+            engine.update_visual_spectrum(&vec![0.0f32; frames as usize * 2], false);
         }
         return;
     };
     if engine.effects_enabled && engine.dsp.is_null() {
-        let samples = std::slice::from_raw_parts_mut(buffer as *mut f32, frames as usize * 2);
+        let samples = std::slice::from_raw_parts_mut(buffer as *mut f32, frames as usize * chans);
         samples.fill(0.0);
-        engine.update_visual_spectrum(samples, false);
+        engine.update_visual_spectrum(&vec![0.0f32; frames as usize * 2], false);
         return;
     }
     if !engine.dsp.is_null() && engine.effects_enabled {
-        process_dsp(engine.dsp, buffer as *mut f32, frames, 2);
+        process_dsp(engine.dsp, buffer as *mut f32, frames, chans as i32);
     }
 
-    let samples = std::slice::from_raw_parts(buffer as *const f32, frames as usize * 2);
-    engine.update_visual_spectrum(samples, false);
+    let processed_floats = std::slice::from_raw_parts(buffer as *const f32, frames as usize * chans);
+    for i in 0..(frames as usize) {
+        let left = processed_floats[i * chans];
+        let right = if chans > 1 { processed_floats[i * chans + 1] } else { left };
+        stereo_samples[i * 2] = left;
+        stereo_samples[i * 2 + 1] = right;
+    }
+    engine.update_visual_spectrum(&stereo_samples, false);
 }
 
 static ENGINE: OnceLock<Mutex<NativeAudioEngine>> = OnceLock::new();

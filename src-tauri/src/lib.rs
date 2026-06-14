@@ -33,6 +33,7 @@ mod native_audio;
 mod plugin_commands;
 mod security;
 mod webview_manager;
+mod downloader;
 
 pub use security::validator::PluginValidator;
 
@@ -2386,6 +2387,13 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
             start_mpris_bridge(app.handle().clone());
             start_webkit_mpris_seek_bridge(app.handle().clone());
@@ -2443,7 +2451,21 @@ pub fn run() {
             webview_manager::clear_web_data,
             webview_manager::update_webview_bounds,
             webview_manager::update_webview_bounds_rect,
-            plugin_commands::install_plugin
+            webview_manager::get_current_webview_url,
+            plugin_commands::install_plugin,
+            downloader::resolve_ytdlp_binary,
+            downloader::resolve_ffmpeg_binary,
+            downloader::ensure_ytdlp_binary,
+            downloader::ensure_ffmpeg_binary,
+            downloader::check_ytdlp_binary,
+            downloader::get_downloader_settings,
+            downloader::save_downloader_settings,
+            downloader::run_ytdlp_json,
+            downloader::start_download,
+            downloader::get_downloader_history,
+            downloader::clear_downloader_history,
+            downloader::save_downloader_history_item,
+            downloader::get_default_download_dir
         ])
         .run(tauri::generate_context!())
         .expect("Tauri uygulamasi calistirilamadi");

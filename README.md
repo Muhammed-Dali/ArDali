@@ -17,12 +17,12 @@
   </a>
   <img alt="tauri" src="https://img.shields.io/badge/Tauri-2.x-24c8db?style=for-the-badge&logo=tauri&logoColor=ffffff&labelColor=0b1220"/>
   <img alt="rust" src="https://img.shields.io/badge/Rust-Native%20Core-f97316?style=for-the-badge&logo=rust&logoColor=ffffff&labelColor=0b1220"/>
-  <img alt="version" src="https://img.shields.io/badge/version-4.0.0-22c55e?style=for-the-badge&labelColor=0b1220"/>
+  <img alt="version" src="https://img.shields.io/badge/version-4.2.1-22c55e?style=for-the-badge&labelColor=0b1220"/>
 </p>
 
 ## ArDali Nedir?
 
-ArDali WebMedia 4.0.0, eski Electron tabanlı ArDali fikrinin daha hafif ve daha yerel çalışan Tauri/Rust sürümüdür. Uygulama; yerel müzik ve video oynatma, web tabanlı müzik platformları, gelişmiş ses efektleri, projectM görselleştirici, MPRIS entegrasyonu ve resmi eklenti mağazasını tek masaüstü arayüzünde birleştirir.
+ArDali WebMedia 4.2.1, eski Electron tabanlı ArDali fikrinin daha hafif ve daha yerel çalışan Tauri/Rust sürümüdür. Uygulama; yerel müzik ve video oynatma, web tabanlı müzik platformları, gelişmiş ses efektleri, projectM görselleştirici, MPRIS entegrasyonu ve resmi eklenti mağazasını tek masaüstü arayüzünde birleştirir.
 
 Bu sürümün ana hedefi daha düşük kaynak kullanımı, daha güçlü Linux masaüstü entegrasyonu ve web medyasına uygulanabilen gerçek zamanlı ses işleme altyapısıdır.
 
