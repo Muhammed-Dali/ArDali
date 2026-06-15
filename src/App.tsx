@@ -3190,6 +3190,7 @@ function SettingsWindow() {
 
   const resetDraft = () => {
     setDraft(resetWebSettings());
+    setPerfDraft({ hardwareAcceleration: true, pageCache: false });
   };
 
   const clearWebDataNow = async (target: "cache" | "cookies" | "site-data" | "all", label: string) => {
