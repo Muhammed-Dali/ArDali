@@ -132,11 +132,17 @@ type EffectsSnapshot = {
   dspSettings?: Partial<DspSettings>;
 };
 
+type PerformanceSnapshot = {
+  hardwareAcceleration?: boolean;
+  pageCache?: boolean;
+};
+
 type LibrarySnapshot = {
   music: LibraryItemSnapshot[];
   videos: LibraryItemSnapshot[];
   playback?: PlaybackSnapshot;
   effects?: EffectsSnapshot;
+  performance?: PerformanceSnapshot;
 };
 
 type VisualizerAnalyzerId =
@@ -3128,6 +3134,8 @@ function translateSfxParam(language: AppLanguage, param: SfxParam) {
 function SettingsWindow() {
   const [activeTab, setActiveTab] = useState<SettingsTabId>("web");
   const [draft, setDraft] = useState<WebSettings>(() => loadWebSettings());
+  const [perfDraft, setPerfDraft] = useState<PerformanceSnapshot>({ hardwareAcceleration: true, pageCache: false });
+  const [libraryRef, setLibraryRef] = useState<LibrarySnapshot | null>(null);
   const [webClearStatus, setWebClearStatus] = useState("");
   const text = (key: string) => tr(draft.language, key);
 
@@ -3135,8 +3143,23 @@ function SettingsWindow() {
     applyDocumentTheme(resolveEffectiveTheme(draft), { persist: false });
   }, [draft.theme, draft.followSystemTheme]);
 
+  useEffect(() => {
+    if (isTauriRuntime()) {
+      invoke<LibrarySnapshot>("load_library").then((lib) => {
+        setLibraryRef(lib);
+        if (lib.performance) {
+          setPerfDraft(lib.performance);
+        }
+      }).catch(console.error);
+    }
+  }, []);
+
   const updateDraft = <K extends keyof WebSettings>(key: K, value: WebSettings[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  const updatePerfDraft = <K extends keyof PerformanceSnapshot>(key: K, value: PerformanceSnapshot[K]) => {
+    setPerfDraft((current) => ({ ...current, [key]: value }));
   };
 
   const closeWindow = async () => {
@@ -3150,6 +3173,10 @@ function SettingsWindow() {
   const saveAndClose = async () => {
     const previousLanguage = loadWebSettings().language;
     saveWebSettings(draft);
+    if (isTauriRuntime() && libraryRef) {
+      const updatedLib = { ...libraryRef, performance: perfDraft };
+      await invoke("save_library", { library: updatedLib }).catch(console.error);
+    }
     if (previousLanguage !== draft.language) {
       const shouldRestart = window.confirm(`${text("settings.behavior.restartTitle")}\n\n${text("settings.behavior.restartMessage")}`);
       if (shouldRestart && isTauriRuntime()) {
@@ -3198,6 +3225,23 @@ function SettingsWindow() {
           <>
             <h1>{text("settings.tabs.web")}</h1>
             <div className="settings-web-grid">
+            <div className="settings-panel">
+              <h2>{draft.language === "tr-TR" ? "Performans" : "Performance"}</h2>
+              
+              <label className="settings-check-row">
+                <input type="checkbox" checked={perfDraft.hardwareAcceleration} onChange={(event) => updatePerfDraft("hardwareAcceleration", event.target.checked)} />
+                <span>{draft.language === "tr-TR" ? "Donanım Hızlandırma (WebGL, Canvas)" : "Hardware Acceleration (WebGL, Canvas)"}</span>
+              </label>
+
+              <label className="settings-check-row">
+                <input type="checkbox" checked={perfDraft.pageCache} onChange={(event) => updatePerfDraft("pageCache", event.target.checked)} />
+                <span>{draft.language === "tr-TR" ? "Sayfa Ön Belleği (Hızlı gezinme için RAM'de tutar)" : "Page Cache (Keeps in RAM for fast nav)"}</span>
+              </label>
+              <p style={{ fontSize: "0.85em", opacity: 0.7, marginTop: "4px" }}>
+                {draft.language === "tr-TR" ? "Not: Performans ayarlarının geçerli olması için web uygulamasının yeniden yüklenmesi veya uygulamanın yeniden başlatılması gerekebilir." : "Note: Web app reload or app restart might be required for performance settings to take effect."}
+              </p>
+            </div>
+
             <div className="settings-panel">
               <h2>{text("settings.web.general")}</h2>
               <label className="settings-check-row">

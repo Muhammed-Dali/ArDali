@@ -56,6 +56,26 @@ struct LibrarySnapshot {
     playback: PlaybackSnapshot,
     #[serde(default)]
     effects: Option<EffectsSnapshot>,
+    #[serde(default)]
+    performance: Option<PerformanceSnapshot>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceSnapshot {
+    #[serde(default = "default_true")]
+    pub hardware_acceleration: bool,
+    #[serde(default)]
+    pub page_cache: bool,
+}
+
+impl Default for PerformanceSnapshot {
+    fn default() -> Self {
+        Self {
+            hardware_acceleration: true,
+            page_cache: false,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

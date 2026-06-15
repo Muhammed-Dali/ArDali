@@ -112,7 +112,7 @@ export const defaultWebSettings: WebSettings = {
   defaultPlatformId: "youtube",
   rememberLastPlatform: true,
   restoreLastSession: true,
-  suspendWhenInactive: false,
+  suspendWhenInactive: true,
   startupDelayMs: 700,
   animationMode: "compact",
   motionPreset: "balanced",

@@ -143,7 +143,7 @@ fn win_user_agent_for_mode(mode: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn apply_web_compat_settings(settings: &webkit2gtk::Settings) {
+fn apply_web_compat_settings(settings: &webkit2gtk::Settings, performance: &crate::PerformanceSnapshot) {
     settings.set_enable_webaudio(true);
     settings.set_disable_web_security(true);
     settings.set_enable_javascript(true);
@@ -156,10 +156,10 @@ fn apply_web_compat_settings(settings: &webkit2gtk::Settings) {
     settings.set_enable_media_stream(true);
     settings.set_enable_mediasource(true);
     settings.set_enable_encrypted_media(true);
-    settings.set_enable_webgl(true);
-    settings.set_enable_accelerated_2d_canvas(true);
+    settings.set_enable_webgl(performance.hardware_acceleration);
+    settings.set_enable_accelerated_2d_canvas(performance.hardware_acceleration);
     settings.set_enable_dns_prefetching(true);
-    settings.set_enable_page_cache(true);
+    settings.set_enable_page_cache(performance.page_cache);
     settings.set_enable_site_specific_quirks(true);
     settings.set_media_playback_requires_user_gesture(false);
     settings.set_media_playback_allows_inline(true);
@@ -432,8 +432,14 @@ fn install_or_update_gtk_webview(
                     ctx
                 };
                 let webview = webkit2gtk::WebView::with_context(&web_context);
+                
+                let app_handle_for_lib = app_for_events.clone();
+                let performance = crate::load_library(app_handle_for_lib)
+                    .map(|lib| lib.performance.unwrap_or_default())
+                    .unwrap_or_default();
+
                 if let Some(settings) = WebViewExt::settings(&webview) {
-                    apply_web_compat_settings(&settings);
+                    apply_web_compat_settings(&settings, &performance);
                 }
                 webview.set_halign(gtk::Align::Start);
                 webview.set_valign(gtk::Align::Start);
