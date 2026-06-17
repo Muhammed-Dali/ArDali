@@ -1786,6 +1786,10 @@ input:disabled {
   margin-left: 64px;
 }
 
+.app-shell.web-mode:not(.web-chrome-hidden) .web-tab-bar {
+  margin-left: 64px;
+}
+
 .web-runtime-status {
   position: absolute;
   right: 18px;
