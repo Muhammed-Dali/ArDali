@@ -6,8 +6,9 @@ import {
   CircleHelp,
   Clock3,
   Download,
-  Film,
+  Film, Home,
   FolderPlus,
+  Plus,
   Globe2,
   Grid2X2,
   Image,
@@ -41,6 +42,7 @@ import {
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { SearchAutocomplete } from "./web/SearchAutocomplete";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ChangeEvent, memo, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject, UIEvent as ReactUIEvent, useCallback, useEffect, useMemo, useRef, useState, WheelEvent as ReactWheelEvent } from "react";
@@ -55,6 +57,8 @@ import {
   type ArdaliStoreItem,
 } from "./web/pluginManager";
 import { defaultWebSettings, loadWebSettings, resetWebSettings, saveWebSettings, WEB_SETTINGS_EVENT, type AppLanguage, type AppTheme, type StartupPage, type WebSettings } from "./web/webSettings";
+import { AboutWindow } from "./AboutWindow";
+import { TabBar } from "./TabBar";
 
 type PageId =
   | "files"
@@ -104,6 +108,15 @@ type VideoItem = {
 };
 
 type VideoQuality = "auto" | "1080p" | "720p" | "480p" | "360p";
+
+type Tab = {
+  id: string;
+  url: string;
+  title: string;
+  favicon: string;
+  webviewLabel: string;
+  isLoading: boolean;
+};
 
 type LibraryItemSnapshot = {
   path: string;
@@ -1104,6 +1117,8 @@ function isVisualizerView() {
 function isEqPresetsView() {
   return new URLSearchParams(window.location.search).get("view") === "eq-presets";
 }
+
+function isAboutView() { return new URLSearchParams(window.location.search).get("view") === "about"; }
 
 function isSettingsView() {
   return new URLSearchParams(window.location.search).get("view") === "settings";
@@ -3252,10 +3267,23 @@ function SettingsWindow() {
 
               <div className="settings-row">
                 <div>
+                  <strong>Varsayılan Arama Motoru</strong>
+                  <span>Üst çubuktan yapılan aramalar için kullanılacak motor</span>
+                </div>
+                <select value={draft.searchEngine || "duckduckgo"} onChange={(event) => updateDraft("searchEngine", event.target.value as any)}>
+                  <option value="duckduckgo">DuckDuckGo</option>
+                  <option value="google">Google</option>
+                  <option value="bing">Bing</option>
+                </select>
+              </div>
+
+              <div className="settings-row">
+                <div>
                   <strong>{text("settings.web.defaultPlatform")}</strong>
                   <span>{text("settings.web.defaultPlatformHint")}</span>
                 </div>
                 <select value={draft.defaultPlatformId} onChange={(event) => updateDraft("defaultPlatformId", event.target.value)}>
+                  <option value="search">Arama Sayfası</option>
                   {platforms.map((platform) => (
                     <option key={platform.id} value={platform.id}>
                       {platform.name}
@@ -3877,6 +3905,7 @@ export function App() {
   if (isVisualizerView()) return <ProjectMWindow />;
   if (isEqPresetsView()) return <EqPresetsWindow />;
   if (isSettingsView()) return <SettingsWindow />;
+  if (isAboutView()) return <AboutWindow />;
 
   const nativeAudioMode = isTauriRuntime();
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -3923,6 +3952,59 @@ export function App() {
 
   const [page, setPage] = useState<PageId>("music");
   const pageRef = useRef<PageId>("music");
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+
+  const handleAddTab = async () => {
+    try {
+      const newUrl = "https://google.com";
+      const label = await invoke<string>("create_tab", { url: newUrl });
+      const newTab: Tab = {
+        id: label,
+        url: newUrl,
+        title: "New Tab",
+        favicon: "",
+        webviewLabel: label,
+        isLoading: false
+      };
+      setTabs(prev => [...prev, newTab]);
+      setActiveTabId(label);
+      await invoke("switch_tab", { label });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleCloseTab = async (id: string) => {
+    setTabs(prev => prev.filter(t => t.id !== id));
+    if (activeTabId === id) setActiveTabId(null);
+    try {
+      await invoke("close_tab", { label: id });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleSwitchTab = async (id: string) => {
+    setActiveTabId(id);
+    try {
+      await invoke("switch_tab", { label: id });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    const unlisten = listen<any>("tab_updated", (event) => {
+      const { id, title, url } = event.payload;
+      setTabs(prev => prev.map(tab => tab.id === id ? { ...tab, title, url } : tab));
+    });
+    return () => {
+      unlisten.then(f => f());
+    };
+  }, []);
+
+
   const [tracks, setTracks] = useState<Track[]>([]);
   const [videoItems, setVideoItems] = useState<VideoItem[]>([]);
   const [selectedTrack, setSelectedTrack] = useState(0);
@@ -3957,16 +4039,53 @@ export function App() {
   const [musicViewMode, setMusicViewMode] = useState<MusicViewMode>("list");
   const [musicViewMenuOpen, setMusicViewMenuOpen] = useState(false);
   const [webSettings, setWebSettings] = useState<WebSettings>(() => loadWebSettings());
-  const [activeWebPlatformId, setActiveWebPlatformId] = useState(platforms[0]?.id ?? "");
+  const [activeWebPlatformId, setActiveWebPlatformId] = useState(webSettings.defaultPlatformId || "search");
+  const [openedWebPlatforms, setOpenedWebPlatforms] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem("ardali_opened_web_platforms");
+      return stored ? (JSON.parse(stored) as string[]) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const addOpenedWebPlatform = useCallback((platformId: string) => {
+    if (!platformId || platformId === "search" || platformId === "custom" || platformId === ARDALI_STORE_PLATFORM_ID) return;
+    setOpenedWebPlatforms(prev => {
+      if (prev.includes(platformId)) return prev;
+      const next = [...prev, platformId];
+      try { localStorage.setItem("ardali_opened_web_platforms", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
+  const removeOpenedWebPlatform = useCallback((platformId: string) => {
+    setOpenedWebPlatforms(prev => {
+      const next = prev.filter(id => id !== platformId);
+      try { localStorage.setItem("ardali_opened_web_platforms", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
+
+  const [currentWebUrl, setCurrentWebUrl] = useState("");
+  const [hiddenShortcuts, setHiddenShortcuts] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem("ardali_hidden_shortcuts");
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
   const [platformsCollapsed, setPlatformsCollapsed] = useState(() => {
     return localStorage.getItem("ardali_platforms_collapsed") === "true";
   });
   const [storeItems, setStoreItems] = useState<ArdaliStoreItem[]>([]);
   const [storeStatus, setStoreStatus] = useState("");
   const [webRuntimeStatus, setWebRuntimeStatus] = useState("");
-  const [webChromeHidden, setWebChromeHidden] = useState(false);
-  const activeWebPlatformIdRef = useRef(platforms[0]?.id ?? "");
-  const lastWebPlatformIdRef = useRef(platforms[0]?.id ?? "");
+  const [webChromeHidden, setWebChromeHidden] = useState(true);
+  const activeWebPlatformIdRef = useRef(webSettings.defaultPlatformId || "search");
+  const lastWebPlatformIdRef = useRef(webSettings.defaultPlatformId || "search");
   const webChromeHideTimerRef = useRef<number | null>(null);
   const webChromeBoundsTimerRef = useRef<number | null>(null);
   const webFullscreenRef = useRef(false);
@@ -4270,10 +4389,12 @@ export function App() {
           startupWebSettings.rememberLastPlatform && playback?.activeWebPlatformId
             ? playback.activeWebPlatformId
             : startupWebSettings.defaultPlatformId;
-        if (restoredWebPlatformId && platforms.some((platform) => platform.id === restoredWebPlatformId)) {
+        const isValidPlatform = ["search", "custom", ARDALI_STORE_PLATFORM_ID].includes(restoredWebPlatformId) || platforms.some((platform) => platform.id === restoredWebPlatformId);
+        if (restoredWebPlatformId && isValidPlatform) {
           activeWebPlatformIdRef.current = restoredWebPlatformId;
           lastWebPlatformIdRef.current = restoredWebPlatformId;
           setActiveWebPlatformId(restoredWebPlatformId);
+          addOpenedWebPlatform(restoredWebPlatformId);
         }
         const shouldRestoreLastSection = startupWebSettings.rememberLastSection && isPageId(playback?.currentPage);
         const requestedPage: PageId = shouldRestoreLastSection ? playback.currentPage! : startupWebSettings.startupPage;
@@ -5137,6 +5258,43 @@ export function App() {
     }
   }, [webSettings]);
 
+  const openAboutWindow = useCallback(async () => {
+    const url = "/?view=about";
+
+    if (!isTauriRuntime()) {
+      window.open(url, "ardali-about", "width=800,height=600");
+      return;
+    }
+
+    try {
+      const existing = await WebviewWindow.getByLabel("about");
+      if (existing) {
+        await existing.show();
+        await existing.setFocus();
+        return;
+      }
+
+      const webview = new WebviewWindow("about", {
+        url,
+        title: "Hakkında",
+        width: 800,
+        height: 600,
+        minWidth: 400,
+        minHeight: 400,
+        resizable: true,
+        decorations: true,
+        center: true,
+        visible: true,
+      });
+
+      webview.once("tauri://error", (e) => {
+        console.error("About window creation error:", e);
+      });
+    } catch (error) {
+      console.error("Failed to open About window:", error);
+    }
+  }, []);
+
   const openSettingsWindow = useCallback(async () => {
     const url = "/?view=settings";
 
@@ -5597,6 +5755,7 @@ export function App() {
     activeWebPlatformIdRef.current = platform.id;
     lastWebPlatformIdRef.current = platform.id;
     setActiveWebPlatformId(platform.id);
+    addOpenedWebPlatform(platform.id);
     setWebRuntimeStatus(`${platform.name} yukleniyor...`);
     const platformUrl = webSettings.preferHttps ? platform.url.replace(/^http:/i, "https:") : platform.url;
     await openPlatform(platformUrl).catch((error) => {
@@ -5606,7 +5765,52 @@ export function App() {
     });
     scheduleCurrentWebDaliEffects("platform-open");
     scheduleOfficialPluginsForUrl(platformUrl, "platform-open");
-  }, [scheduleCurrentWebDaliEffects, scheduleOfficialPluginsForUrl, webSettings.preferHttps]);
+  }, [addOpenedWebPlatform, scheduleCurrentWebDaliEffects, scheduleOfficialPluginsForUrl, webSettings.preferHttps]);
+
+  const handleWebSearchQuery = useCallback(async (queryStr: string) => {
+    const query = queryStr.trim();
+    if (!query) return;
+
+    let url = "";
+    if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\/.*)?$/.test(query) && !query.includes(" ")) {
+      url = query.startsWith("http") ? query : `https://${query}`;
+    } else if (query.startsWith("http://") || query.startsWith("https://")) {
+      url = query;
+    } else {
+      const engine = webSettings.searchEngine || "duckduckgo";
+      const encodedQuery = encodeURIComponent(query);
+      if (engine === "google") url = `https://www.google.com/search?q=${encodedQuery}`;
+      else if (engine === "bing") url = `https://www.bing.com/search?q=${encodedQuery}`;
+      else url = `https://duckduckgo.com/?q=${encodedQuery}`;
+    }
+
+    let targetPlatformId = "custom";
+    try {
+      const parsedUrl = new URL(url);
+      const host = parsedUrl.hostname.replace(/^www\./, '');
+      const matched = platforms.find(p => {
+        try {
+          return new URL(p.url).hostname.replace(/^www\./, '') === host;
+        } catch { return false; }
+      });
+      if (matched) targetPlatformId = matched.id;
+    } catch {}
+
+    activeWebPlatformIdRef.current = targetPlatformId;
+    setActiveWebPlatformId(targetPlatformId);
+    setWebRuntimeStatus(`Aranıyor...`);
+    await openPlatform(url).catch((error) => {
+      reportClientError("web.search", error);
+    });
+    (document.activeElement as HTMLElement)?.blur();
+  }, [webSettings.searchEngine, openPlatform]);
+
+  const handleWebSearch = useCallback(async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    const query = formData.get("q")?.toString();
+    if (query) void handleWebSearchQuery(query);
+  }, [handleWebSearchQuery]);
 
   const openArdaliStore = useCallback(() => {
     if (activeWebPlatformIdRef.current && activeWebPlatformIdRef.current !== ARDALI_STORE_PLATFORM_ID) {
@@ -5668,6 +5872,9 @@ export function App() {
     if (page === "web" && webSettings.enabled) {
       if (activeWebPlatformIdRef.current === ARDALI_STORE_PLATFORM_ID) {
         void parkWeb().catch((error) => reportClientError("ardali-store.open-active", error));
+        return;
+      }
+      if (activeWebPlatformIdRef.current === "custom" || activeWebPlatformIdRef.current === "search") {
         return;
       }
       const activePlatform =
@@ -5757,8 +5964,6 @@ export function App() {
         window.clearTimeout(webChromeBoundsTimerRef.current);
         webChromeBoundsTimerRef.current = null;
       }
-      setWebChromeHidden(false);
-      webChromeHiddenTargetRef.current = false;
       void setWebChromeVisibility(false).catch((error) => reportClientError("web.chrome-visible", error));
       return;
     }
@@ -5797,37 +6002,17 @@ export function App() {
     };
 
     const syncChromeWithFocus = () => {
-      applyHidden(webFullscreenRef.current || (!windowFocusedRef.current && !auxiliaryWindowFocusedRef.current));
+      applyHidden(webFullscreenRef.current);
     };
 
     const refreshAuxiliaryFocus = async () => {
-      const labels = ["downloader", "sound-effects", "settings", "eq-presets"];
-      for (const label of labels) {
-        try {
-          const webview = await WebviewWindow.getByLabel(label);
-          if (webview && await webview.isFocused()) {
-            auxiliaryWindowFocusedRef.current = true;
-            syncChromeWithFocus();
-            return;
-          }
-        } catch {
-          // Ignore windows that are not open yet.
-        }
-      }
-
-      auxiliaryWindowFocusedRef.current = false;
-      syncChromeWithFocus();
+      // Logic removed since we no longer auto hide on auxiliary window focus loss
     };
 
-    windowFocusedRef.current = true;
-    applyHidden(false);
-    void getCurrentWindow().isFocused().then((focused) => {
-      windowFocusedRef.current = focused;
-      if (!disposed) syncChromeWithFocus();
-    }).catch(() => undefined);
+    applyHidden(webFullscreenRef.current);
 
     const revealChromeFromActivity = () => {
-      if (!webFullscreenRef.current && windowFocusedRef.current) applyHidden(false);
+      // Logic removed since it was tied to pointer motion revealing auto-hidden chrome
     };
 
     let unlisten: (() => void) | undefined;
@@ -5839,6 +6024,15 @@ export function App() {
     void listen("webview-pointer-motion", revealChromeFromActivity).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
+    });
+    void listen<string>("open-internal-web", (event) => {
+      const url = event.payload;
+      if (url) {
+        switchPage("web");
+        setTimeout(() => {
+          void openPlatform(url).catch((e) => reportClientError("web.open-internal", e));
+        }, 500);
+      }
     });
     void listen<boolean>("webview-fullscreen-change", (event) => {
       webFullscreenRef.current = Boolean(event.payload);
@@ -7179,6 +7373,7 @@ export function App() {
 
   return (
     <main className={`app-shell ${railCollapsed ? "rail-collapsed" : ""} ${page === "web" ? "web-mode" : ""} ${webChromeHidden ? "web-chrome-hidden" : ""} web-motion-${webSettings.motionPreset} web-animation-${webSettings.animationMode} ${webSettings.lowPowerMode ? "web-low-power" : ""}`}>
+
       <input
         ref={fileInputRef}
         className="hidden-file-input"
@@ -7455,7 +7650,22 @@ export function App() {
           {page === "web" ? (
             <>
               {activeWebPlatformId !== ARDALI_STORE_PLATFORM_ID ? (
-                <div className="web-history-controls" aria-label="Web gezinme kontrolleri">
+                <div className="web-history-controls" aria-label="Web gezinme kontrolleri" style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+                  <button
+                    className={`web-history-btn floating-menu-btn ${!webChromeHidden ? "menu-open" : ""}`}
+                    onClick={() => {
+                      const nextHidden = !webChromeHidden;
+                      setWebChromeHidden(nextHidden);
+                      webChromeHiddenTargetRef.current = nextHidden;
+                      if (isTauriRuntime()) {
+                        setTimeout(() => void onWindowResize().catch(() => {}), 300);
+                      }
+                    }}
+                    title="Menü"
+                    aria-label="Menü"
+                  >
+                    <img src="/downloader/icons/app/ardali_dawlod_menu.png" alt="Menu" style={{ width: "20px", height: "20px" }} />
+                  </button>
                   <button
                     className="web-history-btn"
                     onClick={() => void navigateWebHistory("back").catch((error) => reportClientError("web.history-back", error))}
@@ -7472,44 +7682,173 @@ export function App() {
                   >
                     <ChevronRight size={20} />
                   </button>
+                  <button
+                    className="web-history-btn"
+                    onClick={() => {
+                      if (isTauriRuntime()) {
+                        invoke("run_script_in_web", { script: "location.reload();" }).catch(() => {});
+                      }
+                    }}
+                    title="Yenile"
+                    aria-label="Yenile"
+                  >
+                    <RotateCw size={18} />
+                  </button>
+                  <button
+                    className="web-history-btn"
+                    onClick={() => {
+                      activeWebPlatformIdRef.current = "search";
+                      setActiveWebPlatformId("search");
+                      void parkWeb().catch((e) => reportClientError("web.park", e));
+                    }}
+                    title="Ana Sayfa"
+                    aria-label="Ana Sayfa"
+                  >
+                    <Home size={18} />
+                  </button>
                 </div>
               ) : null}
-              <div className={`web-platforms-list ${platformsCollapsed ? "collapsed" : ""}`}>
-                <button
-                  className={`web-platform-btn web-store-btn ${activeWebPlatformId === ARDALI_STORE_PLATFORM_ID ? "active" : ""}`}
-                  onClick={openArdaliStore}
-                  title="ArDali Mağaza"
-                  aria-label="ArDali Mağaza"
-                >
-                  <Store size={21} />
-                </button>
-                {platforms.map((platform) => (
-                  <button
-                    className={`web-platform-btn ${activeWebPlatformId === platform.id ? "active" : ""}`}
-                    key={platform.id}
-                    onClick={() => void handleOpenWebPlatform(platform)}
-                    title={platform.name}
-                    aria-label={platform.name}
-                  >
-                    <WebPlatformIcon platform={platform} />
-                  </button>
-                ))}
+
+              {/* BRAVE-STYLE TABS */}
+              <div style={{ display: "flex", alignItems: "center", flex: 1, gap: "4px", overflowX: "auto", margin: "0 12px", scrollbarWidth: "none" }}>
+                {openedWebPlatforms.map(id => {
+                  const platform = platforms.find(p => p.id === id);
+                  if (!platform) return null;
+                  const isActive = activeWebPlatformId === platform.id;
+                  return (
+                    <div
+                      key={platform.id}
+                      className="web-platform-tab"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        padding: "0 6px 0 10px",
+                        height: "32px",
+                        minWidth: "100px",
+                        maxWidth: "180px",
+                        borderRadius: "8px 8px 0 0",
+                        backgroundColor: isActive ? "rgba(0,200,255,0.15)" : "rgba(255,255,255,0.05)",
+                        borderBottom: isActive ? "2px solid var(--accent, #00c8ff)" : "2px solid transparent",
+                        cursor: "pointer",
+                        transition: "all 0.15s ease",
+                        flexShrink: 1,
+                        position: "relative",
+                      }}
+                      onClick={() => void handleOpenWebPlatform(platform).catch(() => {})}
+                      onMouseEnter={(e) => {
+                        if (!isActive) {
+                          e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.1)";
+                        }
+                        const btn = e.currentTarget.querySelector<HTMLElement>(".ptab-close");
+                        if (btn) btn.style.opacity = "1";
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!isActive) {
+                          e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.05)";
+                        }
+                        const btn = e.currentTarget.querySelector<HTMLElement>(".ptab-close");
+                        if (btn) btn.style.opacity = "0";
+                      }}
+                    >
+                      <img
+                        src={`/icons/web-platforms/${platform.icon}`}
+                        alt={platform.name}
+                        style={{ width: "16px", height: "16px", objectFit: "contain", flexShrink: 0, opacity: isActive ? 1 : 0.6 }}
+                      />
+                      <span style={{
+                        fontSize: "12px",
+                        fontWeight: isActive ? 600 : 400,
+                        color: isActive ? "var(--accent, #00c8ff)" : "var(--text-main)",
+                        opacity: isActive ? 1 : 0.75,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        flex: 1,
+                        userSelect: "none",
+                      }}>
+                        {platform.name}
+                      </span>
+                      <button
+                        className="ptab-close"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeOpenedWebPlatform(platform.id);
+                          if (isActive) {
+                            activeWebPlatformIdRef.current = "search";
+                            setActiveWebPlatformId("search");
+                            void parkWeb().catch(() => {});
+                          }
+                        }}
+                        title="Kapat"
+                        style={{
+                          opacity: 0,
+                          width: "18px",
+                          height: "18px",
+                          borderRadius: "50%",
+                          border: "none",
+                          background: "rgba(255,255,255,0.12)",
+                          color: "rgba(255,255,255,0.8)",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          flexShrink: 0,
+                          fontSize: "11px",
+                          padding: 0,
+                          transition: "opacity 0.15s, background 0.12s",
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(220,50,50,0.6)"; e.currentTarget.style.opacity = "1"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.12)"; }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
-              <button
-                className="web-platform-collapse-btn"
-                onClick={() => {
-                  setPlatformsCollapsed((prev) => {
-                    const next = !prev;
-                    localStorage.setItem("ardali_platforms_collapsed", String(next));
-                    return next;
-                  });
-                }}
-                title={platformsCollapsed ? "Platformları Göster" : "Platformları Gizle"}
-                aria-label={platformsCollapsed ? "Platformları Göster" : "Platformları Gizle"}
-              >
-                {platformsCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
-              </button>
+
+              {/* RIGHT: Search bar and new tab */}
+              <div className="web-search-form" style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
+                <SearchAutocomplete
+                  searchEngine={webSettings.searchEngine || "duckduckgo"}
+                  onSearch={(q) => void handleWebSearchQuery(q)}
+                  value={currentWebUrl}
+                  style={{ width: "220px" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    activeWebPlatformIdRef.current = "search";
+                    setActiveWebPlatformId("search");
+                    void parkWeb().catch((e) => reportClientError("web.park", e));
+                  }}
+                  title="Yeni Sekme"
+                  aria-label="Yeni Sekme"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: "32px",
+                    height: "32px",
+                    borderRadius: "50%",
+                    border: "none",
+                    backgroundColor: "transparent",
+                    color: "var(--text-main)",
+                    cursor: "pointer",
+                    marginLeft: "8px",
+                    transition: "background-color 0.2s"
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "var(--hover)"}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                >
+                  <Plus size={18} />
+                </button>
+              </div>
+
+              <div className={`web-platforms-list ${platformsCollapsed ? "collapsed" : ""}`} style={{ display: 'none' }}></div>
             </>
+
           ) : (
           <>
           <button
@@ -7585,8 +7924,18 @@ export function App() {
           )}
         </div>
 
+        {page === "web" && (
+          <TabBar 
+            tabs={tabs} 
+            activeTabId={activeTabId} 
+            onAddTab={handleAddTab} 
+            onCloseTab={handleCloseTab} 
+            onSwitchTab={handleSwitchTab} 
+          />
+        )}
+
         {page === "web" ? (
-        <div className="web-stage" aria-hidden={activeWebPlatformId !== ARDALI_STORE_PLATFORM_ID && !webRuntimeStatus}>
+        <div className="web-stage" aria-hidden={activeWebPlatformId !== ARDALI_STORE_PLATFORM_ID && activeWebPlatformId !== "search" && !webRuntimeStatus}>
           {activeWebPlatformId === ARDALI_STORE_PLATFORM_ID ? (
             <ArdaliStoreView
               items={storeItems}
@@ -7596,6 +7945,81 @@ export function App() {
               onToggle={handleTogglePlugin}
               onClose={closeArdaliStore}
             />
+          ) : activeWebPlatformId === "search" ? (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", padding: "24px" }}>
+              <img src="/icons/app/ardali_256.png" alt="ArDli Logo" style={{ width: "120px", opacity: 0.8, marginBottom: "32px", borderRadius: "20%" }} />
+              <SearchAutocomplete
+                className="large-search"
+                searchEngine={webSettings.searchEngine || "duckduckgo"}
+                onSearch={handleWebSearchQuery}
+                placeholder="Web'de bir şeyler arayın veya URL girin..."
+                style={{ width: "100%", maxWidth: "640px" }}
+                autoFocus={true}
+                icon={<img src="/icons/app/ardali_256.png" alt="ArDli Logo" style={{ width: "24px", height: "24px", borderRadius: "6px" }} />}
+              />
+              <div className="web-shortcuts-grid" style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))",
+                gap: "16px",
+                width: "100%",
+                maxWidth: "640px",
+                marginTop: "48px",
+                justifyContent: "center"
+              }}>
+                {platforms.filter((p) => !hiddenShortcuts.includes(p.id)).slice(0, 8).map((platform) => (
+                  <button
+                    key={platform.id}
+                    onClick={() => void handleOpenWebPlatform(platform)}
+                    className="web-shortcut-btn"
+                    title={platform.name}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      gap: "12px",
+                      background: "transparent",
+                      border: "none",
+                      color: "var(--text-main)",
+                      cursor: "pointer",
+                      padding: "12px",
+                      borderRadius: "12px",
+                      transition: "background-color 0.2s"
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "var(--bg-light)"}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                  >
+                    <div
+                      className="web-shortcut-remove-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setHiddenShortcuts((prev) => {
+                          const next = [...prev, platform.id];
+                          localStorage.setItem("ardali_hidden_shortcuts", JSON.stringify(next));
+                          return next;
+                        });
+                      }}
+                      title="Kaldır"
+                      aria-label="Kaldır"
+                    >
+                      <X size={12} />
+                    </div>
+                    <div style={{
+                      width: "48px",
+                      height: "48px",
+                      borderRadius: "50%",
+                      backgroundColor: "var(--bg-light)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      boxShadow: "0 4px 12px rgba(0,0,0,0.1)"
+                    }}>
+                      <WebPlatformIcon platform={platform} />
+                    </div>
+                    <span style={{ fontSize: "12px", textAlign: "center", opacity: 0.8 }}>{platform.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           ) : webRuntimeStatus ? (
             <div className="web-runtime-status" role="status">{webRuntimeStatus}</div>
           ) : null}

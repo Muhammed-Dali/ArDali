@@ -1039,18 +1039,11 @@ input:disabled {
 .app-shell.web-mode,
 .app-shell.rail-collapsed.web-mode {
   grid-template-columns: 64px minmax(0, 1fr);
-  grid-template-rows: 40px minmax(0, 1fr);
 }
 
 .web-tab-bar {
-  grid-row: 1;
-  grid-column: 2;
 }
 
-.app-shell.web-mode .web-stage {
-  grid-row: 2;
-  grid-column: 2;
-}
 
 .app-shell.web-mode .rail,
 .app-shell.web-mode .web-platform-bar {
@@ -1679,7 +1672,7 @@ input:disabled {
 
 .workspace.web-workspace {
   grid-column: 1 / -1;
-  grid-template-rows: 53px minmax(0, 1fr);
+  grid-template-rows: 53px 40px minmax(0, 1fr);
 }
 
 .titlebar {
