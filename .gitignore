@@ -13,3 +13,16 @@ dali-visualizer/target/
 .agents/
 .codex/
 **/.ci-tmp/
+fix_*.py
+fix_*.cjs
+fix_*.cjs
+patch_*.js
+patch_*.cjs
+patch_*.rs
+rewrite_*.py
+add_*.py
+refactor_*.py
+test_compile.rs
+test_notify.py
+stash_*.tsx
+grep_map.txt
