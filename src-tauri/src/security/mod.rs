@@ -9,11 +9,7 @@ use std::collections::HashSet;
 const ARDALI_PUBLIC_KEY: &str = "6d798ced13fe5794fd9fbd6b4f9c5a93fc29651170bc1a16d56728c00507de84";
 
 // Guvenilir eklenti listesi. Resmi registry akisi hazir olana kadar binary icinden korunur.
-const TRUSTED_PLUGINS: &[&str] = &[
-    "ad-blocker",
-    "downloader",
-    "shazam",
-];
+const TRUSTED_PLUGINS: &[&str] = &["ad-blocker", "downloader", "shazam"];
 
 pub struct SecurityManager {
     verifying_key: VerifyingKey,
@@ -41,8 +37,8 @@ impl SecurityManager {
     }
 
     pub fn verify_signature(&self, content: &[u8], signature_hex: &str) -> Result<(), String> {
-        let sig_bytes = hex::decode(signature_hex)
-            .map_err(|e| format!("Invalid signature hex: {}", e))?;
+        let sig_bytes =
+            hex::decode(signature_hex).map_err(|e| format!("Invalid signature hex: {}", e))?;
         let sig_array: [u8; 64] = sig_bytes
             .try_into()
             .map_err(|_| "Invalid signature length".to_string())?;

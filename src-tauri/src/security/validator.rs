@@ -28,10 +28,7 @@ impl PluginValidator {
 
     pub fn validate(&self, manifest: &PluginManifest, content: &[u8]) -> Result<(), String> {
         if !self.security.is_whitelisted(&manifest.id) {
-            return Err(format!(
-                "Eklenti guvenilir listede degil: {}",
-                manifest.id
-            ));
+            return Err(format!("Eklenti guvenilir listede degil: {}", manifest.id));
         }
 
         if !manifest.trusted {

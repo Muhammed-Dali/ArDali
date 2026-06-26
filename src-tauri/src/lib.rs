@@ -29,11 +29,11 @@ use tauri::{
     Emitter, Manager, Runtime, UserAttentionType, WindowEvent,
 };
 
+mod downloader;
 mod native_audio;
 mod plugin_commands;
 mod security;
 mod webview_manager;
-mod downloader;
 
 pub use security::validator::PluginValidator;
 
@@ -1158,11 +1158,7 @@ fn find_visualizer_presets(app: &tauri::AppHandle) -> Option<PathBuf> {
         candidates.push(path);
     }
     for root in project_root_candidates(app) {
-        candidates.push(
-            root.join("_up_")
-                .join("public")
-                .join("visualizer-presets"),
-        );
+        candidates.push(root.join("_up_").join("public").join("visualizer-presets"));
         candidates.push(root.join("public").join("visualizer-presets"));
         candidates.push(root.join("visualizer-presets"));
         candidates.push(root.join("third_party").join("projectm").join("presets"));
@@ -1388,7 +1384,9 @@ fn start_projectm_visualizer(
         match fs::OpenOptions::new().create(true).append(true).open(path) {
             Ok(file) => match file.try_clone() {
                 Ok(stdout) => {
-                    command.stdout(Stdio::from(stdout)).stderr(Stdio::from(file));
+                    command
+                        .stdout(Stdio::from(stdout))
+                        .stderr(Stdio::from(file));
                 }
                 Err(_) => {
                     command.stdout(Stdio::null()).stderr(Stdio::null());
@@ -2180,6 +2178,16 @@ fn emit_media_control(app: &tauri::AppHandle, action: &str) {
     let _ = app.emit("mpris-control", action);
 }
 
+fn quit_app_from_tray(app: &tauri::AppHandle) {
+    APP_QUITTING.store(true, Ordering::SeqCst);
+    emit_media_control(app, "stop");
+    thread::spawn(|| {
+        thread::sleep(Duration::from_millis(120));
+        std::process::exit(0);
+    });
+    app.exit(0);
+}
+
 struct TrayLabels {
     show: &'static str,
     previous: &'static str,
@@ -2375,11 +2383,7 @@ fn create_tray_inner(app: &tauri::App) -> tauri::Result<()> {
             "tray_mute" => emit_media_control(app, "toggle-mute"),
             "tray_like" => emit_media_control(app, "like"),
             "tray_show" => show_main_window(app),
-            "tray_exit" => {
-                APP_QUITTING.store(true, Ordering::SeqCst);
-                emit_media_control(app, "stop");
-                app.exit(0);
-            }
+            "tray_exit" => quit_app_from_tray(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -2432,6 +2436,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            fetch_search_suggestions,
             app_ready,
             is_custom_mpris_enabled,
             native_audio_init,
@@ -2461,17 +2466,24 @@ pub fn run() {
             start_projectm_visualizer,
             feed_projectm_pcm,
             stop_projectm_visualizer,
+            webview_manager::navigate_tab,
             webview_manager::open_web_platform,
             webview_manager::open_web_platform_in_rect,
+            webview_manager::create_tab,
+            webview_manager::switch_tab,
+            webview_manager::close_tab,
             webview_manager::hide_web_view,
+            webview_manager::hide_all_web_views,
             webview_manager::park_web_view,
             webview_manager::navigate_web_history,
+            webview_manager::reload_web_view,
             webview_manager::apply_web_dali_script,
             webview_manager::web_dali_audio_snapshot,
             webview_manager::clear_web_data,
             webview_manager::update_webview_bounds,
             webview_manager::update_webview_bounds_rect,
             webview_manager::get_current_webview_url,
+            webview_manager::get_active_web_content_url,
             plugin_commands::install_plugin,
             downloader::resolve_ytdlp_binary,
             downloader::resolve_ffmpeg_binary,
@@ -2489,4 +2501,47 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Tauri uygulamasi calistirilamadi");
+}
+#[tauri::command]
+async fn fetch_search_suggestions(query: String, engine: String) -> Result<Vec<String>, String> {
+    let url = if engine == "google" {
+        format!(
+            "https://suggestqueries.google.com/complete/search?client=chrome&q={}",
+            query
+        )
+    } else {
+        format!("https://duckduckgo.com/ac/?q={}", query)
+    };
+
+    let client = reqwest::Client::new();
+    let res = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let text = res.text().await.map_err(|e| e.to_string())?;
+
+    if engine == "google" {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(arr) = json.as_array() {
+                if let Some(suggestions) = arr.get(1).and_then(|v| v.as_array()) {
+                    let mut res = Vec::new();
+                    for s in suggestions {
+                        if let Some(s_str) = s.as_str() {
+                            res.push(s_str.to_string());
+                        }
+                    }
+                    return Ok(res);
+                }
+            }
+        }
+    } else {
+        if let Ok(json) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+            let mut res = Vec::new();
+            for item in json {
+                if let Some(phrase) = item.get("phrase").and_then(|v| v.as_str()) {
+                    res.push(phrase.to_string());
+                }
+            }
+            return Ok(res);
+        }
+    }
+
+    Ok(Vec::new())
 }

@@ -5,7 +5,9 @@ import {
   ChevronRight,
   CircleHelp,
   Clock3,
+  Copy,
   Download,
+  ExternalLink,
   Film, Home,
   FolderPlus,
   Plus,
@@ -17,6 +19,8 @@ import {
   Maximize2,
   Music2,
   Pause,
+  Pin,
+  PinOff,
   Play,
   RefreshCw,
   Repeat,
@@ -47,7 +51,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ChangeEvent, memo, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject, UIEvent as ReactUIEvent, useCallback, useEffect, useMemo, useRef, useState, WheelEvent as ReactWheelEvent } from "react";
 import { flushSync } from "react-dom";
-import { applyWebDaliEffects, clearWebData, getWebDaliRawPcm, getWebDaliRawSpectrum, hideWeb, navigateWebHistory, onWindowResize, openPlatform, parkWeb, platforms, setWebChromeVisibility, type WebDaliPayload, type WebPlatform } from "./web/webManager";
+import { applyWebDaliEffects, clearWebData, getWebDaliRawPcm, getWebDaliRawSpectrum, hideAllWeb, hideWeb, navigateWebHistory, onWindowResize, openPlatform, parkWeb, platforms, reloadWeb, setWebChromeVisibility, type WebDaliPayload, type WebPlatform } from "./web/webManager";
 import {
   applyOfficialPluginsForUrl,
   ARDALI_STORE_PLATFORM_ID,
@@ -116,7 +120,191 @@ type Tab = {
   favicon: string;
   webviewLabel: string;
   isLoading: boolean;
+  pinned?: boolean;
 };
+
+const WEB_TABS_STORAGE_KEY = "ardali_web_tabs_v1";
+const WEB_TOP_SITES_STORAGE_KEY = "ardali_web_top_sites_v1";
+const WEB_PINNED_SITES_STORAGE_KEY = "ardali_web_pinned_sites_v1";
+const WEB_PINNED_SITES_OPEN_STORAGE_KEY = "ardali_web_pinned_sites_open_v1";
+const WEB_CHROME_HIDDEN_STORAGE_KEY = "ardali_web_chrome_hidden_v1";
+const BLANK_WEB_URL = "about:blank";
+const ARDALI_STORE_TAB_URL = "ardali://store";
+const ARDALI_STORE_TAB_TITLE = "ArDali Mağaza";
+
+type WebTopSite = {
+  id: string;
+  title: string;
+  url: string;
+  host: string;
+  visits: number;
+  lastVisited: number;
+};
+
+type WebPinnedSite = {
+  id: string;
+  title: string;
+  url: string;
+  host: string;
+};
+
+function isBlankWebUrl(url: string | null | undefined) {
+  return !url || url === BLANK_WEB_URL;
+}
+
+function isTikTokFeedUrl(url: string | null | undefined) {
+  try {
+    const parsed = new URL(String(url || ""));
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.replace(/\/+$/g, "");
+    return (host === "tiktok.com" || host.endsWith(".tiktok.com")) &&
+      (path === "" || path === "/foryou" || path === "/following" || /^\/[a-z]{2}(?:-[A-Z]{2})?$/.test(path));
+  } catch {
+    return false;
+  }
+}
+
+function makeBlankWebTab(id = "main"): Tab {
+  return {
+    id,
+    url: BLANK_WEB_URL,
+    title: "Yeni Sekme",
+    favicon: "",
+    webviewLabel: id,
+    isLoading: false,
+    pinned: false,
+  };
+}
+
+function makeStoreWebTab(id = `tab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`): Tab {
+  return {
+    id,
+    url: ARDALI_STORE_TAB_URL,
+    title: ARDALI_STORE_TAB_TITLE,
+    favicon: "",
+    webviewLabel: id,
+    isLoading: false,
+    pinned: false,
+  };
+}
+
+function isArdaliStoreTabUrl(url: string | null | undefined) {
+  return String(url || "") === ARDALI_STORE_TAB_URL;
+}
+
+function tabHostname(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function titleFromUrl(url: string) {
+  const host = tabHostname(url);
+  return host || "Yeni Sekme";
+}
+
+function webFaviconUrl(url: string, host = tabHostname(url)) {
+  if (isArdaliStoreTabUrl(url)) return "/icons/app/ardali_256.png";
+  return host
+    ? `https://www.google.com/s2/favicons?domain=${host}&sz=32`
+    : "/icons/app/ardali_256.png";
+}
+
+function normalizeStoredWebTabs(value: unknown): { tabs: Tab[]; activeTabId: string } {
+  const raw = value && typeof value === "object" ? value as { tabs?: unknown; activeTabId?: unknown } : {};
+  const storedTabs = Array.isArray(raw.tabs) ? raw.tabs : [];
+  const tabs = storedTabs
+    .map((item): Tab | null => {
+      if (!item || typeof item !== "object") return null;
+      const tab = item as Partial<Tab>;
+      const id = typeof tab.id === "string" && tab.id.trim() ? tab.id : "";
+      if (!id) return null;
+      const url = typeof tab.url === "string" && tab.url.trim() ? tab.url : BLANK_WEB_URL;
+      const isStoreTab = isArdaliStoreTabUrl(url);
+      return {
+        id,
+        url,
+        title: isStoreTab ? ARDALI_STORE_TAB_TITLE : typeof tab.title === "string" && tab.title.trim() ? tab.title : isBlankWebUrl(url) ? "Yeni Sekme" : url,
+        favicon: typeof tab.favicon === "string" ? tab.favicon : "",
+        webviewLabel: typeof tab.webviewLabel === "string" && tab.webviewLabel.trim() ? tab.webviewLabel : id,
+        isLoading: false,
+        pinned: Boolean(tab.pinned),
+      };
+    })
+    .filter((tab): tab is Tab => Boolean(tab))
+    .slice(0, 24);
+
+  const nextTabs = tabs.length ? tabs : [makeBlankWebTab()];
+  if (!nextTabs.some((tab) => tab.id === "main")) nextTabs.unshift(makeBlankWebTab());
+  const requestedActiveTabId = typeof raw.activeTabId === "string" ? raw.activeTabId : "main";
+  const activeTabId = nextTabs.some((tab) => tab.id === requestedActiveTabId)
+    ? requestedActiveTabId
+    : nextTabs[0].id;
+
+  return { tabs: nextTabs, activeTabId };
+}
+
+function loadStoredWebTabs(): { tabs: Tab[]; activeTabId: string } {
+  try {
+    return normalizeStoredWebTabs(JSON.parse(localStorage.getItem(WEB_TABS_STORAGE_KEY) || "null"));
+  } catch {
+    return normalizeStoredWebTabs(null);
+  }
+}
+
+function loadStoredTopSites(): WebTopSite[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(WEB_TOP_SITES_STORAGE_KEY) || "[]");
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item): WebTopSite | null => {
+        if (!item || typeof item !== "object") return null;
+        const site = item as Partial<WebTopSite>;
+        const url = typeof site.url === "string" ? site.url : "";
+        const host = typeof site.host === "string" && site.host ? site.host : tabHostname(url);
+        if (!url || !host) return null;
+        return {
+          id: host,
+          title: typeof site.title === "string" && site.title.trim() ? site.title : titleFromUrl(url),
+          url,
+          host,
+          visits: Math.max(1, Number(site.visits) || 1),
+          lastVisited: Number(site.lastVisited) || Date.now(),
+        };
+      })
+      .filter((site): site is WebTopSite => Boolean(site))
+      .slice(0, 24);
+  } catch {
+    return [];
+  }
+}
+
+function loadStoredPinnedSites(): WebPinnedSite[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(WEB_PINNED_SITES_STORAGE_KEY) || "[]");
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item): WebPinnedSite | null => {
+        if (!item || typeof item !== "object") return null;
+        const site = item as Partial<WebPinnedSite>;
+        const url = typeof site.url === "string" ? site.url : "";
+        const host = typeof site.host === "string" && site.host ? site.host : tabHostname(url);
+        if (!url || !host) return null;
+        return {
+          id: host,
+          title: typeof site.title === "string" && site.title.trim() ? site.title : titleFromUrl(url),
+          url,
+          host,
+        };
+      })
+      .filter((site): site is WebPinnedSite => Boolean(site))
+      .slice(0, 16);
+  } catch {
+    return [];
+  }
+}
 
 type LibraryItemSnapshot = {
   path: string;
@@ -1106,6 +1294,8 @@ function getSoundEffectsWindowTitle(scope: string, language: AppLanguage = "tr-T
   return formatLabel(tr(language, "sfx.windowTitle"), { scope: tr(language, `sfx.scope.${normalizeSfxScope(scope)}`) });
 }
 
+const activeWebTabChangedEvent = "ardali-active-web-tab-changed";
+
 function isSoundEffectsView() {
   return new URLSearchParams(window.location.search).get("view") === "sound-effects";
 }
@@ -1119,6 +1309,74 @@ function isEqPresetsView() {
 }
 
 function isAboutView() { return new URLSearchParams(window.location.search).get("view") === "about"; }
+function isTabMenuView() { return new URLSearchParams(window.location.search).get("view") === "tab-menu"; }
+
+function TabMenuWindow() {
+  const params = new URLSearchParams(window.location.search);
+  const tabId = params.get("tabId") || "";
+  const pinned = params.get("pinned") === "true";
+  const language = loadWebSettings().language;
+  const text = (key: string) => tr(language, key);
+  const sentRef = useRef(false);
+
+  const close = async () => {
+    try {
+      await getCurrentWebviewWindow().close();
+    } catch {
+      window.close();
+    }
+  };
+
+  const send = async (action: string) => {
+    if (sentRef.current) return;
+    sentRef.current = true;
+    try {
+      await emit("tab-menu-action", { tabId, action });
+    } finally {
+      await close();
+    }
+  };
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") void close();
+    };
+    const onBlur = () => window.setTimeout(() => void close(), 80);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+
+  return (
+    <main className="tab-menu-window">
+      <button onClick={() => void send(pinned ? "unpin" : "pin")}>
+        <Pin size={15} />
+        <span>{pinned ? text("web.tab.unpin") : text("web.tab.pin")}</span>
+      </button>
+      <button onClick={() => void send("shortcut")}>
+        <Sparkles size={15} />
+        <span>{text("web.tab.addHome")}</span>
+      </button>
+      <button onClick={() => void send("duplicate")}>
+        <FolderPlus size={15} />
+        <span>{text("web.tab.duplicate")}</span>
+      </button>
+      <button onClick={() => void send("close-others")}>
+        <Maximize2 size={15} />
+        <span>{text("web.tab.closeOthers")}</span>
+      </button>
+      {!pinned ? (
+        <button className="danger" onClick={() => void send("close")}>
+          <X size={15} />
+          <span>{text("web.tab.close")}</span>
+        </button>
+      ) : null}
+    </main>
+  );
+}
 
 function isSettingsView() {
   return new URLSearchParams(window.location.search).get("view") === "settings";
@@ -1613,7 +1871,7 @@ function WebPlatformIcon({ platform }: { platform: WebPlatform }) {
   return (
     <img
       className="web-platform-icon"
-      src={`/icons/web-platforms/${platform.icon}`}
+      src={webFaviconUrl(platform.url)}
       alt=""
       aria-hidden="true"
       draggable={false}
@@ -1902,6 +2160,8 @@ const i18n: Record<AppLanguage, Record<string, string>> = {
     "settings.behavior.restartMessage": "Dil değişikliğinin uygulanması için uygulamanın yeniden başlatılması gerekiyor. Şimdi yeniden başlatılsın mı?",
     "settings.web.general": "Genel",
     "settings.web.enable": "Web deneyimini etkinleştir",
+    "settings.web.searchEngine": "Varsayılan Arama Motoru",
+    "settings.web.searchEngineHint": "Üst çubuktan yapılan aramalar için kullanılacak motor",
     "settings.web.defaultPlatform": "Varsayılan platform",
     "settings.web.defaultPlatformHint": "Web sekmesi ilk açıldığında seçilecek platform",
     "settings.web.rememberPlatform": "Son kullanılan web platformunu hatırla",
@@ -1990,6 +2250,51 @@ const i18n: Record<AppLanguage, Record<string, string>> = {
     "nav.comfortable": "Rahat",
     "nav.card": "Kart",
     "nav.nowPlaying": "Şu An Çalınan: {name}",
+    "web.newTab": "Yeni Sekme",
+    "web.storeTitle": "ArDali Mağaza",
+    "web.menu": "Menü",
+    "web.home": "Ana Sayfa",
+    "web.close": "Kapat",
+    "web.addedPages": "Eklenen sayfalar",
+    "web.shortcuts": "Kısayollar",
+    "web.removeShortcut": "Kaldır",
+    "web.pinnedSites": "Sabit siteler",
+    "web.pinnedSiteOptions": "{title} - sağ tık: seçenekler",
+    "web.hidePinnedSites": "Sabit siteleri gizle",
+    "web.showPinnedSites": "Sabit siteleri göster",
+    "web.loadingPlatform": "{name} yükleniyor...",
+    "web.openFailed": "{name} açılamadı: {message}",
+    "web.searching": "Aranıyor...",
+    "web.searchPage": "Arama Sayfası",
+    "web.loadRetryFailed": "{name} yüklenemedi. Yeniden deneniyor... {message}",
+    "web.tab.pin": "Sekmeyi sabitle",
+    "web.tab.unpin": "Sabitlemeyi kaldır",
+    "web.tab.addHome": "Ana sayfaya ekle",
+    "web.tab.duplicate": "Sekmeyi çoğalt",
+    "web.tab.closeOthers": "Diğer sekmeleri kapat",
+    "web.tab.close": "Sekmeyi kapat",
+    "web.open": "Aç",
+    "web.openNewTab": "Yeni sekmede aç",
+    "web.copyLink": "Bağlantıyı kopyala",
+    "web.removePinned": "Sabitlerden kaldır",
+    "web.store.kicker": "Resmi Yerel Mağaza",
+    "web.store.description": "Bu ilk sürümde yalnızca uygulamayla gelen, resmi ve alan adı sınırlandırılmış eklentiler çalışır.",
+    "web.store.close": "Mağazayı kapat",
+    "web.store.security": "Dışarıdan eklenti yükleme kapalı. Eklentiler Tauri komutlarına ve sistem dosyalarına erişemez.",
+    "web.store.official": "Resmi",
+    "web.store.external": "Harici",
+    "web.store.install": "Kur",
+    "web.store.remove": "Kaldır",
+    "web.store.itemsReady": "{count} resmi eklenti hazır.",
+    "web.store.empty": "Mağaza kataloğu boş.",
+    "web.store.loadFailed": "Mağaza kataloğu okunamadı.",
+    "web.store.verifying": "Eklenti güvenlik doğrulamasından geçiriliyor...",
+    "web.store.removing": "Eklenti kaldırılıyor...",
+    "web.store.installed": "Eklenti kuruldu. Uyumlu platform açıldığında çalışacak.",
+    "web.store.removed": "Eklenti kaldırıldı.",
+    "web.store.installFailed": "Eklenti kurulamadı: {message}",
+    "web.store.enabled": "Eklenti etkinleştirildi.",
+    "web.store.disabled": "Eklenti devre dışı bırakıldı.",
     "music.emptyTitle": "Müzik kütüphanesi boş",
     "music.emptyHint": "MP3, FLAC, WAV, OGG, M4A veya OPUS dosyalarını ekleyin.",
     "music.noResultsTitle": "Sonuç bulunamadı",
@@ -2193,6 +2498,8 @@ const i18n: Record<AppLanguage, Record<string, string>> = {
     "settings.behavior.restartMessage": "The app must restart to apply the language change. Restart now?",
     "settings.web.general": "General",
     "settings.web.enable": "Enable web experience",
+    "settings.web.searchEngine": "Default Search Engine",
+    "settings.web.searchEngineHint": "Engine used for searches from the top bar",
     "settings.web.defaultPlatform": "Default platform",
     "settings.web.defaultPlatformHint": "The platform selected when the Web tab first opens",
     "settings.web.rememberPlatform": "Remember the last used web platform",
@@ -2281,6 +2588,51 @@ const i18n: Record<AppLanguage, Record<string, string>> = {
     "nav.comfortable": "Comfortable",
     "nav.card": "Card",
     "nav.nowPlaying": "Now Playing: {name}",
+    "web.newTab": "New Tab",
+    "web.storeTitle": "ArDali Store",
+    "web.menu": "Menu",
+    "web.home": "Home",
+    "web.close": "Close",
+    "web.addedPages": "Added pages",
+    "web.shortcuts": "Shortcuts",
+    "web.removeShortcut": "Remove",
+    "web.pinnedSites": "Pinned sites",
+    "web.pinnedSiteOptions": "{title} - right click: options",
+    "web.hidePinnedSites": "Hide pinned sites",
+    "web.showPinnedSites": "Show pinned sites",
+    "web.loadingPlatform": "{name} loading...",
+    "web.openFailed": "{name} could not open: {message}",
+    "web.searching": "Searching...",
+    "web.searchPage": "Search Page",
+    "web.loadRetryFailed": "{name} failed to load. Retrying... {message}",
+    "web.tab.pin": "Pin tab",
+    "web.tab.unpin": "Unpin tab",
+    "web.tab.addHome": "Add to home",
+    "web.tab.duplicate": "Duplicate tab",
+    "web.tab.closeOthers": "Close other tabs",
+    "web.tab.close": "Close tab",
+    "web.open": "Open",
+    "web.openNewTab": "Open in new tab",
+    "web.copyLink": "Copy link",
+    "web.removePinned": "Remove from pinned",
+    "web.store.kicker": "Official Local Store",
+    "web.store.description": "In this first version, only official domain-limited plugins bundled with the app can run.",
+    "web.store.close": "Close store",
+    "web.store.security": "External plugin loading is disabled. Plugins cannot access Tauri commands or system files.",
+    "web.store.official": "Official",
+    "web.store.external": "External",
+    "web.store.install": "Install",
+    "web.store.remove": "Remove",
+    "web.store.itemsReady": "{count} official plugins ready.",
+    "web.store.empty": "Store catalog is empty.",
+    "web.store.loadFailed": "Store catalog could not be read.",
+    "web.store.verifying": "Verifying plugin security...",
+    "web.store.removing": "Removing plugin...",
+    "web.store.installed": "Plugin installed. It will run when a compatible platform opens.",
+    "web.store.removed": "Plugin removed.",
+    "web.store.installFailed": "Plugin could not be installed: {message}",
+    "web.store.enabled": "Plugin enabled.",
+    "web.store.disabled": "Plugin disabled.",
     "music.emptyTitle": "Music library is empty",
     "music.emptyHint": "Add MP3, FLAC, WAV, OGG, M4A or OPUS files.",
     "music.noResultsTitle": "No results found",
@@ -2484,6 +2836,8 @@ const i18n: Record<AppLanguage, Record<string, string>> = {
     "settings.behavior.restartMessage": "يجب إعادة تشغيل التطبيق لتطبيق تغيير اللغة. هل تريد إعادة التشغيل الآن؟",
     "settings.web.general": "عام",
     "settings.web.enable": "تفعيل تجربة الويب",
+    "settings.web.searchEngine": "محرك البحث الافتراضي",
+    "settings.web.searchEngineHint": "المحرك المستخدم للبحث من الشريط العلوي",
     "settings.web.defaultPlatform": "المنصة الافتراضية",
     "settings.web.defaultPlatformHint": "المنصة التي يتم اختيارها عند فتح تبويب الويب لأول مرة",
     "settings.web.rememberPlatform": "تذكر آخر منصة ويب مستخدمة",
@@ -2572,6 +2926,51 @@ const i18n: Record<AppLanguage, Record<string, string>> = {
     "nav.comfortable": "مريح",
     "nav.card": "بطاقات",
     "nav.nowPlaying": "يتم التشغيل الآن: {name}",
+    "web.newTab": "تبويب جديد",
+    "web.storeTitle": "متجر ArDali",
+    "web.menu": "القائمة",
+    "web.home": "الصفحة الرئيسية",
+    "web.close": "إغلاق",
+    "web.addedPages": "الصفحات المضافة",
+    "web.shortcuts": "الاختصارات",
+    "web.removeShortcut": "إزالة",
+    "web.pinnedSites": "المواقع المثبتة",
+    "web.pinnedSiteOptions": "{title} - انقر بالزر الأيمن: خيارات",
+    "web.hidePinnedSites": "إخفاء المواقع المثبتة",
+    "web.showPinnedSites": "إظهار المواقع المثبتة",
+    "web.loadingPlatform": "جار تحميل {name}...",
+    "web.openFailed": "تعذر فتح {name}: {message}",
+    "web.searching": "جار البحث...",
+    "web.searchPage": "صفحة البحث",
+    "web.loadRetryFailed": "تعذر تحميل {name}. جار إعادة المحاولة... {message}",
+    "web.tab.pin": "تثبيت التبويب",
+    "web.tab.unpin": "إلغاء تثبيت التبويب",
+    "web.tab.addHome": "إضافة إلى الصفحة الرئيسية",
+    "web.tab.duplicate": "تكرار التبويب",
+    "web.tab.closeOthers": "إغلاق التبويبات الأخرى",
+    "web.tab.close": "إغلاق التبويب",
+    "web.open": "فتح",
+    "web.openNewTab": "فتح في تبويب جديد",
+    "web.copyLink": "نسخ الرابط",
+    "web.removePinned": "إزالة من المثبتة",
+    "web.store.kicker": "متجر محلي رسمي",
+    "web.store.description": "في هذا الإصدار الأول، تعمل فقط الإضافات الرسمية المرفقة مع التطبيق والمحددة بنطاقات معينة.",
+    "web.store.close": "إغلاق المتجر",
+    "web.store.security": "تحميل الإضافات الخارجية معطل. لا يمكن للإضافات الوصول إلى أوامر Tauri أو ملفات النظام.",
+    "web.store.official": "رسمي",
+    "web.store.external": "خارجي",
+    "web.store.install": "تثبيت",
+    "web.store.remove": "إزالة",
+    "web.store.itemsReady": "{count} إضافات رسمية جاهزة.",
+    "web.store.empty": "كتالوج المتجر فارغ.",
+    "web.store.loadFailed": "تعذرت قراءة كتالوج المتجر.",
+    "web.store.verifying": "جار التحقق من أمان الإضافة...",
+    "web.store.removing": "جار إزالة الإضافة...",
+    "web.store.installed": "تم تثبيت الإضافة. ستعمل عند فتح منصة متوافقة.",
+    "web.store.removed": "تمت إزالة الإضافة.",
+    "web.store.installFailed": "تعذر تثبيت الإضافة: {message}",
+    "web.store.enabled": "تم تفعيل الإضافة.",
+    "web.store.disabled": "تم تعطيل الإضافة.",
     "music.emptyTitle": "مكتبة الموسيقى فارغة",
     "music.emptyHint": "أضف ملفات MP3 أو FLAC أو WAV أو OGG أو M4A أو OPUS.",
     "music.noResultsTitle": "لم يتم العثور على نتائج",
@@ -2775,6 +3174,8 @@ const i18n: Record<AppLanguage, Record<string, string>> = {
     "settings.behavior.restartMessage": "La aplicación debe reiniciarse para aplicar el cambio de idioma. ¿Reiniciar ahora?",
     "settings.web.general": "General",
     "settings.web.enable": "Activar experiencia web",
+    "settings.web.searchEngine": "Motor de búsqueda predeterminado",
+    "settings.web.searchEngineHint": "Motor usado para las búsquedas desde la barra superior",
     "settings.web.defaultPlatform": "Plataforma predeterminada",
     "settings.web.defaultPlatformHint": "La plataforma elegida al abrir la pestaña Web por primera vez",
     "settings.web.rememberPlatform": "Recordar la última plataforma web usada",
@@ -2863,6 +3264,51 @@ const i18n: Record<AppLanguage, Record<string, string>> = {
     "nav.comfortable": "Cómodo",
     "nav.card": "Tarjeta",
     "nav.nowPlaying": "Reproduciendo: {name}",
+    "web.newTab": "Nueva pestaña",
+    "web.storeTitle": "Tienda ArDali",
+    "web.menu": "Menú",
+    "web.home": "Inicio",
+    "web.close": "Cerrar",
+    "web.addedPages": "Páginas añadidas",
+    "web.shortcuts": "Atajos",
+    "web.removeShortcut": "Quitar",
+    "web.pinnedSites": "Sitios fijados",
+    "web.pinnedSiteOptions": "{title} - clic derecho: opciones",
+    "web.hidePinnedSites": "Ocultar sitios fijados",
+    "web.showPinnedSites": "Mostrar sitios fijados",
+    "web.loadingPlatform": "Cargando {name}...",
+    "web.openFailed": "No se pudo abrir {name}: {message}",
+    "web.searching": "Buscando...",
+    "web.searchPage": "Página de búsqueda",
+    "web.loadRetryFailed": "No se pudo cargar {name}. Reintentando... {message}",
+    "web.tab.pin": "Fijar pestaña",
+    "web.tab.unpin": "Desfijar pestaña",
+    "web.tab.addHome": "Añadir a inicio",
+    "web.tab.duplicate": "Duplicar pestaña",
+    "web.tab.closeOthers": "Cerrar otras pestañas",
+    "web.tab.close": "Cerrar pestaña",
+    "web.open": "Abrir",
+    "web.openNewTab": "Abrir en nueva pestaña",
+    "web.copyLink": "Copiar enlace",
+    "web.removePinned": "Quitar de fijados",
+    "web.store.kicker": "Tienda local oficial",
+    "web.store.description": "En esta primera versión solo funcionan los plugins oficiales incluidos con la app y limitados por dominio.",
+    "web.store.close": "Cerrar tienda",
+    "web.store.security": "La carga de plugins externos está desactivada. Los plugins no pueden acceder a comandos de Tauri ni a archivos del sistema.",
+    "web.store.official": "Oficial",
+    "web.store.external": "Externo",
+    "web.store.install": "Instalar",
+    "web.store.remove": "Quitar",
+    "web.store.itemsReady": "{count} plugins oficiales listos.",
+    "web.store.empty": "El catálogo de la tienda está vacío.",
+    "web.store.loadFailed": "No se pudo leer el catálogo de la tienda.",
+    "web.store.verifying": "Verificando la seguridad del plugin...",
+    "web.store.removing": "Quitando plugin...",
+    "web.store.installed": "Plugin instalado. Se ejecutará al abrir una plataforma compatible.",
+    "web.store.removed": "Plugin quitado.",
+    "web.store.installFailed": "No se pudo instalar el plugin: {message}",
+    "web.store.enabled": "Plugin activado.",
+    "web.store.disabled": "Plugin desactivado.",
     "music.emptyTitle": "La biblioteca de música está vacía",
     "music.emptyHint": "Añade archivos MP3, FLAC, WAV, OGG, M4A u OPUS.",
     "music.noResultsTitle": "No se encontraron resultados",
@@ -3211,7 +3657,7 @@ function SettingsWindow() {
   const clearWebDataNow = async (target: "cache" | "cookies" | "site-data" | "all", label: string) => {
     setWebClearStatus(formatLabel(text("settings.web.clearing"), { target: label }));
     try {
-      await clearWebData(target);
+      await clearWebData((window as any).__ardali_activeTabId || '', target);
       setWebClearStatus(formatLabel(text("settings.web.cleared"), { target: label }));
     } catch (error) {
       reportClientError("web.clear-data", error);
@@ -3267,8 +3713,8 @@ function SettingsWindow() {
 
               <div className="settings-row">
                 <div>
-                  <strong>Varsayılan Arama Motoru</strong>
-                  <span>Üst çubuktan yapılan aramalar için kullanılacak motor</span>
+                  <strong>{text("settings.web.searchEngine")}</strong>
+                  <span>{text("settings.web.searchEngineHint")}</span>
                 </div>
                 <select value={draft.searchEngine || "duckduckgo"} onChange={(event) => updateDraft("searchEngine", event.target.value as any)}>
                   <option value="duckduckgo">DuckDuckGo</option>
@@ -3283,7 +3729,7 @@ function SettingsWindow() {
                   <span>{text("settings.web.defaultPlatformHint")}</span>
                 </div>
                 <select value={draft.defaultPlatformId} onChange={(event) => updateDraft("defaultPlatformId", event.target.value)}>
-                  <option value="search">Arama Sayfası</option>
+                  <option value="search">{text("web.searchPage")}</option>
                   {platforms.map((platform) => (
                     <option key={platform.id} value={platform.id}>
                       {platform.name}
@@ -3730,20 +4176,22 @@ function ArdaliStoreView({
   onToggle: (pluginId: string, enabled: boolean) => void;
   onClose: () => void;
 }) {
+  const language = loadWebSettings().language;
+  const text = (key: string) => tr(language, key);
   return (
-    <section className="ardali-store-view" aria-label="ArDali Magaza">
+    <section className="ardali-store-view" aria-label={text("web.storeTitle")}>
       <header className="ardali-store-head">
         <div>
-          <span className="ardali-store-kicker">Resmi Yerel Mağaza</span>
-          <h1>ArDali Mağaza</h1>
-          <p>Bu ilk sürümde yalnızca uygulamayla gelen, resmi ve alan adı sınırlandırılmış eklentiler çalışır.</p>
+          <span className="ardali-store-kicker">{text("web.store.kicker")}</span>
+          <h1>{text("web.storeTitle")}</h1>
+          <p>{text("web.store.description")}</p>
         </div>
         <div className="ardali-store-head-actions">
           <button className="ardali-store-refresh" onClick={onRefresh} type="button">
             <RefreshCw size={17} />
-            Yenile
+            {text("nav.refresh")}
           </button>
-          <button className="ardali-store-close" onClick={onClose} type="button" title="Mağazayı kapat" aria-label="Mağazayı kapat">
+          <button className="ardali-store-close" onClick={onClose} type="button" title={text("web.store.close")} aria-label={text("web.store.close")}>
             <X size={18} />
           </button>
         </div>
@@ -3751,7 +4199,7 @@ function ArdaliStoreView({
 
       <div className="ardali-store-security">
         <Check size={18} />
-        <span>Dışarıdan eklenti yükleme kapalı. Eklentiler Tauri komutlarına ve sistem dosyalarına erişemez.</span>
+        <span>{text("web.store.security")}</span>
       </div>
 
       {status ? <div className="ardali-store-status">{status}</div> : null}
@@ -3765,7 +4213,7 @@ function ArdaliStoreView({
             <div className="ardali-store-card-body">
               <div className="ardali-store-card-title">
                 <h2>{plugin.name}</h2>
-                <span>{plugin.official ? "Resmi" : "Harici"}</span>
+                <span>{plugin.official ? text("web.store.official") : text("web.store.external")}</span>
               </div>
               <p>{plugin.description}</p>
               <div className="ardali-store-meta">
@@ -3785,7 +4233,7 @@ function ArdaliStoreView({
                 type="button"
                 onClick={() => onInstall(plugin.id, !plugin.installed)}
               >
-                {plugin.installed ? "Kaldır" : "Kur"}
+                {plugin.installed ? text("web.store.remove") : text("web.store.install")}
               </button>
               <button
                 className={`ardali-store-toggle ${plugin.enabled ? "active" : ""}`}
@@ -3793,7 +4241,7 @@ function ArdaliStoreView({
                 type="button"
                 onClick={() => onToggle(plugin.id, !plugin.enabled)}
               >
-                {plugin.enabled ? "Açık" : "Kapalı"}
+                {plugin.enabled ? text("sfx.on") : text("sfx.off")}
               </button>
             </div>
           </article>
@@ -3833,6 +4281,8 @@ function trackFromPath(path: string, index: number, title?: string, duration = 0
     url: pathToMediaUrl(path),
   };
 }
+
+
 
 function getTrackArtwork(track?: Track) {
   if (track?.coverDataUrl) {
@@ -3900,12 +4350,40 @@ function createReverbImpulse(context: AudioContext) {
   return impulse;
 }
 
+const createTauriIcon = async (svgPath: string): Promise<any> => {
+  return new Promise((resolve) => {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#cccccc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${svgPath}</svg>`;
+    const blob = new Blob([svg], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const img = new window.Image();
+    img.onload = async () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 24;
+      canvas.height = 24;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return resolve(null);
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      const imageData = ctx.getImageData(0, 0, 24, 24);
+      try {
+        const { Image } = await import('@tauri-apps/api/image');
+        resolve(await Image.new(new Uint8Array(imageData.data.buffer), 24, 24));
+      } catch (e) {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+};
+
 export function App() {
   if (isSoundEffectsView()) return <SoundEffectsWindow />;
   if (isVisualizerView()) return <ProjectMWindow />;
   if (isEqPresetsView()) return <EqPresetsWindow />;
   if (isSettingsView()) return <SettingsWindow />;
   if (isAboutView()) return <AboutWindow />;
+  if (isTabMenuView()) return <TabMenuWindow />;
 
   const nativeAudioMode = isTauriRuntime();
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -3949,59 +4427,308 @@ export function App() {
   const videosRef = useRef<VideoItem[]>([]);
   const stopAfterCurrentRef = useRef(false);
   const startupPlaybackHandledRef = useRef(false);
+  const appClosingRef = useRef(false);
 
   const [page, setPage] = useState<PageId>("music");
   const pageRef = useRef<PageId>("music");
-  const [tabs, setTabs] = useState<Tab[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const restoredWebTabsRef = useRef(loadStoredWebTabs());
+  const [tabs, setTabs] = useState<Tab[]>(() => restoredWebTabsRef.current.tabs);
+  const [activeTabId, setActiveTabId] = useState<string | null>(() => restoredWebTabsRef.current.activeTabId);
+  const [pinnedSites, setPinnedSites] = useState<WebPinnedSite[]>(() => loadStoredPinnedSites());
+  const [pinnedSitesOpen, setPinnedSitesOpen] = useState(() => {
+    try {
+      return localStorage.getItem(WEB_PINNED_SITES_OPEN_STORAGE_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const [tabContextMenu, setTabContextMenu] = useState<{ tabId: string; pinned: boolean; x: number; y: number } | null>(null);
+  const [pinnedSiteContextMenu, setPinnedSiteContextMenu] = useState<{ site: WebPinnedSite; x: number; y: number } | null>(null);
+  const isAddingTabRef = useRef(false);
+  const duplicatingTabsRef = useRef(new Set<string>());
+  const closingTabsRef = useRef(new Set<string>());
+  const hydratedWebTabsRef = useRef(new Set<string>());
+  const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? makeBlankWebTab(), [activeTabId, tabs]);
+  const activeTabShowsSearch = isBlankWebUrl(activeTab.url) && !isArdaliStoreTabUrl(activeTab.url);
+
+  useEffect(() => {
+    (window as any).__ardali_activeTabId = activeTabId;
+    if (isTauriRuntime() && activeTabId) {
+      void emit(activeWebTabChangedEvent, activeTabId).catch(() => undefined);
+    }
+  }, [activeTabId]);
+
+  useEffect(() => {
+    const markClosing = () => {
+      appClosingRef.current = true;
+    };
+    window.addEventListener("beforeunload", markClosing);
+    window.addEventListener("pagehide", markClosing);
+    return () => {
+      window.removeEventListener("beforeunload", markClosing);
+      window.removeEventListener("pagehide", markClosing);
+    };
+  }, []);
+
+  useEffect(() => {
+    setCurrentWebUrl(isBlankWebUrl(activeTab.url) ? "" : activeTab.url);
+  }, [activeTab.url]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(WEB_TABS_STORAGE_KEY, JSON.stringify({ tabs, activeTabId }));
+    } catch {
+      // localStorage can fail in restricted profiles; tab restore is best-effort.
+    }
+  }, [activeTabId, tabs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(WEB_PINNED_SITES_STORAGE_KEY, JSON.stringify(pinnedSites));
+    } catch {
+      // best-effort pinned site restore
+    }
+  }, [pinnedSites]);
 
   const handleAddTab = async () => {
+    if (isAddingTabRef.current) return;
     try {
-      const newUrl = "https://google.com";
-      const label = await invoke<string>("create_tab", { url: newUrl });
-      const newTab: Tab = {
-        id: label,
-        url: newUrl,
-        title: "New Tab",
-        favicon: "",
-        webviewLabel: label,
-        isLoading: false
-      };
-      setTabs(prev => [...prev, newTab]);
+      isAddingTabRef.current = true;
+      const timestamp = Date.now();
+      const label = `tab_${timestamp}_${Math.random().toString(36).substring(2, 9)}`;
+      const previousActiveTabId = activeTabId;
+      
+      setTabs(prev => [...prev, makeBlankWebTab(label)]);
       setActiveTabId(label);
-      await invoke("switch_tab", { label });
+      activeWebPlatformIdRef.current = "search";
+      setActiveWebPlatformId("search");
+      setWebRuntimeStatus("");
+
+      if (previousActiveTabId) {
+        await parkWeb(previousActiveTabId).catch((error) => reportClientError("web.new-tab-park-current", error));
+      }
     } catch (e) {
       console.error(e);
+    } finally {
+      isAddingTabRef.current = false;
     }
   };
+
+  const activateTabBySnapshot = useCallback(async (tab: Tab | null | undefined, previousTabId?: string | null) => {
+    if (!tab) {
+      const blank = makeBlankWebTab("main");
+      setTabs([blank]);
+      setActiveTabId(blank.id);
+      activeWebPlatformIdRef.current = "search";
+      setActiveWebPlatformId("search");
+      setWebRuntimeStatus("");
+      if (previousTabId) await parkWeb(previousTabId).catch((error) => reportClientError("web.activate-empty-park", error));
+      return;
+    }
+
+    setActiveTabId(tab.id);
+    setWebRuntimeStatus("");
+    if (isArdaliStoreTabUrl(tab.url)) {
+      activeWebPlatformIdRef.current = ARDALI_STORE_PLATFORM_ID;
+      setActiveWebPlatformId(ARDALI_STORE_PLATFORM_ID);
+      setCurrentWebUrl("");
+      if (previousTabId) await parkWeb(previousTabId).catch((error) => reportClientError("web.activate-store-park", error));
+      return;
+    }
+    if (isBlankWebUrl(tab.url)) {
+      activeWebPlatformIdRef.current = "search";
+      setActiveWebPlatformId("search");
+      if (previousTabId) await parkWeb(previousTabId).catch((error) => reportClientError("web.activate-blank-park", error));
+      return;
+    }
+
+    activeWebPlatformIdRef.current = "custom";
+    setActiveWebPlatformId("custom");
+    await invoke("switch_tab", { label: tab.id });
+    await onWindowResize(tab.id);
+  }, []);
 
   const handleCloseTab = async (id: string) => {
-    setTabs(prev => prev.filter(t => t.id !== id));
-    if (activeTabId === id) setActiveTabId(null);
+    const currentTabs = tabs;
+    const closingIndex = currentTabs.findIndex((tab) => tab.id === id);
+    if (closingIndex < 0) return;
+    const remainingTabs = currentTabs.filter((tab) => tab.id !== id);
+    const fallbackIndex = closingIndex > 0 ? closingIndex - 1 : 0;
+    const fallbackTab =
+      activeTabId === id
+        ? remainingTabs[fallbackIndex] ?? remainingTabs[0] ?? null
+        : null;
+    const nextTabs = remainingTabs.length ? remainingTabs : [makeBlankWebTab("main")];
+
+    closingTabsRef.current.add(id);
+    setTabs(nextTabs);
     try {
       await invoke("close_tab", { label: id });
+      if (!remainingTabs.length) {
+        hydratedWebTabsRef.current.delete(id);
+        const blank = nextTabs[0];
+        setActiveTabId(blank.id);
+        (window as any).__ardali_activeTabId = blank.id;
+        activeWebPlatformIdRef.current = "search";
+        setActiveWebPlatformId("search");
+        setWebRuntimeStatus("");
+        await parkWeb(id).catch((error) => reportClientError("web.close-last-park", error));
+      } else if (fallbackTab || activeTabId === id) {
+        await activateTabBySnapshot(fallbackTab, id);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      window.setTimeout(() => {
+        closingTabsRef.current.delete(id);
+        hydratedWebTabsRef.current.delete(id);
+      }, 500);
+    }
+  };
+
+  const handlePinTab = useCallback((id: string, pinned: boolean) => {
+    const tab = tabs.find(item => item.id === id);
+    if (!tab || isBlankWebUrl(tab.url)) return;
+    const host = tabHostname(tab.url);
+    if (!host) return;
+    if (!pinned) {
+      setPinnedSites(prev => prev.filter(site => site.host !== host));
+      return;
+    }
+    setPinnedSites(prev => {
+      const nextSite: WebPinnedSite = {
+        id: host,
+        host,
+        url: tab.url,
+        title: tab.title && tab.title !== BLANK_WEB_URL ? tab.title : titleFromUrl(tab.url),
+      };
+      return [nextSite, ...prev.filter(site => site.host !== host)].slice(0, 16);
+    });
+  }, [tabs]);
+
+  const handleDuplicateTab = useCallback((id: string) => {
+    if (duplicatingTabsRef.current.has(id)) return;
+    const source = tabs.find(tab => tab.id === id);
+    if (!source) return;
+    duplicatingTabsRef.current.add(id);
+    const label = `tab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    hydratedWebTabsRef.current.add(label);
+    const duplicate = { ...source, id: label, webviewLabel: label, pinned: false, isLoading: !isBlankWebUrl(source.url) };
+    setTabs(prev => [...prev, duplicate]);
+    setActiveTabId(label);
+    if (isBlankWebUrl(source.url)) {
+      activeWebPlatformIdRef.current = "search";
+      setActiveWebPlatformId("search");
+      duplicatingTabsRef.current.delete(id);
+      return;
+    }
+    activeWebPlatformIdRef.current = "custom";
+    setActiveWebPlatformId("custom");
+    void invoke("create_tab", { label, url: source.url })
+      .then(() => invoke("switch_tab", { label }))
+      .then(() => onWindowResize(label))
+      .catch((error) => reportClientError("web.duplicate-tab", error))
+      .finally(() => {
+        duplicatingTabsRef.current.delete(id);
+      });
+  }, [tabs]);
+
+  const handleCloseOtherTabs = useCallback((id: string) => {
+    const keep = tabs.find(tab => tab.id === id);
+    if (!keep) return;
+    const closing = tabs.filter(tab => tab.id !== id && !tab.pinned);
+    setTabs(prev => prev.filter(tab => tab.id === id || tab.pinned));
+    setActiveTabId(id);
+    closing.forEach(tab => {
+      void invoke("close_tab", { label: tab.id }).catch((error) => reportClientError("web.close-other-tab", error));
+    });
+    if (isBlankWebUrl(keep.url)) {
+      activeWebPlatformIdRef.current = "search";
+      setActiveWebPlatformId("search");
+      void parkWeb(id).catch((error) => reportClientError("web.close-other-park", error));
+      return;
+    }
+    activeWebPlatformIdRef.current = "custom";
+    setActiveWebPlatformId("custom");
+    void invoke("switch_tab", { label: id })
+      .then(() => onWindowResize(id))
+      .catch((error) => reportClientError("web.close-other-switch", error));
+  }, [tabs]);
+
+  const handleSwitchTab = async (id: string) => {
+    const targetTab = tabs.find((tab) => tab.id === id);
+    const previousActiveTabId = activeTabId;
+    setActiveTabId(id);
+    setWebRuntimeStatus("");
+    if (isArdaliStoreTabUrl(targetTab?.url)) {
+      activeWebPlatformIdRef.current = ARDALI_STORE_PLATFORM_ID;
+      setActiveWebPlatformId(ARDALI_STORE_PLATFORM_ID);
+      setCurrentWebUrl("");
+      refreshStoreItems();
+      try {
+        if (previousActiveTabId) await parkWeb(previousActiveTabId);
+      } catch (e) {
+        console.error(e);
+      }
+      return;
+    }
+    activeWebPlatformIdRef.current = isBlankWebUrl(targetTab?.url) ? "search" : "custom";
+    setActiveWebPlatformId(isBlankWebUrl(targetTab?.url) ? "search" : "custom");
+    try {
+      if (isBlankWebUrl(targetTab?.url)) {
+        if (previousActiveTabId) await parkWeb(previousActiveTabId);
+        return;
+      }
+      await invoke("switch_tab", { label: id });
+      await onWindowResize(id);
     } catch (e) {
       console.error(e);
     }
   };
 
-  const handleSwitchTab = async (id: string) => {
-    setActiveTabId(id);
-    try {
-      await invoke("switch_tab", { label: id });
-    } catch (e) {
-      console.error(e);
-    }
-  };
+  const showNewTabPageInCurrentTab = useCallback(() => {
+    const targetTabId = activeTabId || "main";
+    setTabs(prev => prev.map(tab => tab.id === targetTabId ? makeBlankWebTab(targetTabId) : tab));
+    activeWebPlatformIdRef.current = "search";
+    setActiveWebPlatformId("search");
+    setWebRuntimeStatus("");
+    void parkWeb(targetTabId).catch((error) => reportClientError("web.show-new-tab-page", error));
+  }, [activeTabId]);
 
   useEffect(() => {
     const unlisten = listen<any>("tab_updated", (event) => {
-      const { id, title, url } = event.payload;
-      setTabs(prev => prev.map(tab => tab.id === id ? { ...tab, title, url } : tab));
+      let { id, title, url } = event.payload;
+      if (closingTabsRef.current.has(id)) return;
+      if (url === "about:blank" || title === "about:blank") title = "Yeni Sekme";
+      if (id === (window as any).__ardali_activeTabId) {
+        setCurrentWebUrl(isBlankWebUrl(url) ? "" : url);
+      }
+      if (!isBlankWebUrl(url)) rememberTopSite(url, title);
+      setTabs(prev => {
+        if (prev.some(t => t.id === id)) {
+          return prev.map(tab => tab.id === id ? { ...tab, title, url, isLoading: false } : tab);
+        } else {
+          return [...prev, { id, title, url, favicon: "", webviewLabel: id, isLoading: false }];
+        }
+      });
     });
     return () => {
       unlisten.then(f => f());
     };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return undefined;
+    let unlisten: (() => void) | undefined;
+    void listen<{ id?: string; loading?: boolean }>("tab_loading", (event) => {
+      const id = event.payload?.id;
+      if (!id) return;
+      if (closingTabsRef.current.has(id)) return;
+      setTabs(prev => prev.map(tab => tab.id === id ? { ...tab, isLoading: Boolean(event.payload.loading) } : tab));
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => unlisten?.();
   }, []);
 
 
@@ -4039,36 +4766,31 @@ export function App() {
   const [musicViewMode, setMusicViewMode] = useState<MusicViewMode>("list");
   const [musicViewMenuOpen, setMusicViewMenuOpen] = useState(false);
   const [webSettings, setWebSettings] = useState<WebSettings>(() => loadWebSettings());
-  const [activeWebPlatformId, setActiveWebPlatformId] = useState(webSettings.defaultPlatformId || "search");
+  const [activeWebPlatformId, setActiveWebPlatformId] = useState("search");
   const [openedWebPlatforms, setOpenedWebPlatforms] = useState<string[]>(() => {
     try {
-      const stored = localStorage.getItem("ardali_opened_web_platforms");
-      return stored ? (JSON.parse(stored) as string[]) : [];
-    } catch {
-      return [];
-    }
+      localStorage.removeItem("ardali_opened_web_platforms");
+    } catch {}
+    return [];
   });
 
   const addOpenedWebPlatform = useCallback((platformId: string) => {
     if (!platformId || platformId === "search" || platformId === "custom" || platformId === ARDALI_STORE_PLATFORM_ID) return;
     setOpenedWebPlatforms(prev => {
       if (prev.includes(platformId)) return prev;
-      const next = [...prev, platformId];
-      try { localStorage.setItem("ardali_opened_web_platforms", JSON.stringify(next)); } catch {}
-      return next;
+      return [...prev, platformId];
     });
   }, []);
 
   const removeOpenedWebPlatform = useCallback((platformId: string) => {
     setOpenedWebPlatforms(prev => {
-      const next = prev.filter(id => id !== platformId);
-      try { localStorage.setItem("ardali_opened_web_platforms", JSON.stringify(next)); } catch {}
-      return next;
+      return prev.filter(id => id !== platformId);
     });
   }, []);
 
 
   const [currentWebUrl, setCurrentWebUrl] = useState("");
+  const [topSites, setTopSites] = useState<WebTopSite[]>(() => loadStoredTopSites());
   const [hiddenShortcuts, setHiddenShortcuts] = useState<string[]>(() => {
     try {
       const stored = localStorage.getItem("ardali_hidden_shortcuts");
@@ -4083,9 +4805,15 @@ export function App() {
   const [storeItems, setStoreItems] = useState<ArdaliStoreItem[]>([]);
   const [storeStatus, setStoreStatus] = useState("");
   const [webRuntimeStatus, setWebRuntimeStatus] = useState("");
-  const [webChromeHidden, setWebChromeHidden] = useState(true);
-  const activeWebPlatformIdRef = useRef(webSettings.defaultPlatformId || "search");
-  const lastWebPlatformIdRef = useRef(webSettings.defaultPlatformId || "search");
+  const [webChromeHidden, setWebChromeHidden] = useState(() => {
+    try {
+      return localStorage.getItem(WEB_CHROME_HIDDEN_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const activeWebPlatformIdRef = useRef("search");
+  const lastWebPlatformIdRef = useRef("search");
   const webChromeHideTimerRef = useRef<number | null>(null);
   const webChromeBoundsTimerRef = useRef<number | null>(null);
   const webFullscreenRef = useRef(false);
@@ -4094,6 +4822,182 @@ export function App() {
   const webChromeHiddenTargetRef = useRef<boolean | null>(null);
   const lastAudibleVolumeRef = useRef(0.37);
   const text = useCallback((key: string) => tr(webSettings.language, key), [webSettings.language]);
+
+  const rememberTopSite = useCallback((url: string, title?: string) => {
+    if (isBlankWebUrl(url)) return;
+    const host = tabHostname(url);
+    if (!host) return;
+    setTopSites(prev => {
+      const existing = prev.find(site => site.host === host);
+      const nextSite: WebTopSite = {
+        id: host,
+        host,
+        url,
+        title: title && title !== BLANK_WEB_URL ? title : existing?.title || titleFromUrl(url),
+        visits: (existing?.visits || 0) + 1,
+        lastVisited: Date.now(),
+      };
+      const next = [nextSite, ...prev.filter(site => site.host !== host)]
+        .sort((a, b) => (b.visits - a.visits) || (b.lastVisited - a.lastVisited))
+        .slice(0, 24);
+      try {
+        localStorage.setItem(WEB_TOP_SITES_STORAGE_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  const addCurrentPageToTopSites = useCallback((tabId: string) => {
+    const tab = tabs.find(item => item.id === tabId);
+    if (!tab || isBlankWebUrl(tab.url)) return;
+    rememberTopSite(tab.url, tab.title);
+  }, [rememberTopSite, tabs]);
+
+  const scheduleWebviewBoundsSync = useCallback((tabId: string, reason = "runtime") => {
+    if (!isTauriRuntime() || !tabId) return;
+    [0, 80, 220].forEach((delay) => {
+      window.setTimeout(() => {
+        void onWindowResize(tabId).catch((error) => reportClientError(`web.bounds.${reason}`, error));
+      }, delay);
+    });
+  }, []);
+
+  const isSitePinned = useCallback((url: string) => {
+    const host = tabHostname(url);
+    return Boolean(host && pinnedSites.some(site => site.host === host));
+  }, [pinnedSites]);
+
+  const togglePinnedSitesOpen = useCallback(() => {
+    setPinnedSitesOpen((open) => {
+      const next = !open;
+      try {
+        localStorage.setItem(WEB_PINNED_SITES_OPEN_STORAGE_KEY, String(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  const tabMenuActionsRef = useRef({
+    pin: (tabId: string) => handlePinTab(tabId, true),
+    unpin: (tabId: string) => handlePinTab(tabId, false),
+    shortcut: addCurrentPageToTopSites,
+    duplicate: handleDuplicateTab,
+    closeOthers: handleCloseOtherTabs,
+    close: handleCloseTab,
+  });
+
+  tabMenuActionsRef.current = {
+    pin: (tabId: string) => handlePinTab(tabId, true),
+    unpin: (tabId: string) => handlePinTab(tabId, false),
+    shortcut: addCurrentPageToTopSites,
+    duplicate: handleDuplicateTab,
+    closeOthers: handleCloseOtherTabs,
+    close: handleCloseTab,
+  };
+
+  const openTabContextMenu = useCallback(async (tab: Tab, position: { x: number; y: number }) => {
+    const sitePinned = isSitePinned(tab.url);
+    if (!isTauriRuntime()) {
+      const menuWidth = 240;
+      const menuHeight = 228;
+      const x = Math.max(8, Math.min(Math.round(position.x), window.innerWidth - menuWidth - 8));
+      const y = Math.max(8, Math.min(Math.round(position.y), window.innerHeight - menuHeight - 8));
+
+      setTabContextMenu({
+        tabId: tab.id,
+        pinned: sitePinned,
+        x,
+        y,
+      });
+      return;
+    }
+
+    try {
+      const { Menu } = await import('@tauri-apps/api/menu');
+      const { IconMenuItem } = await import('@tauri-apps/api/menu/iconMenuItem');
+      const { LogicalPosition } = await import('@tauri-apps/api/dpi');
+      const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      
+      const currentWin = getCurrentWebviewWindow();
+      const innerPos = await currentWin.innerPosition();
+      const scaleFactor = await currentWin.scaleFactor();
+      
+      const innerLogicalX = innerPos.x / scaleFactor;
+      const innerLogicalY = innerPos.y / scaleFactor;
+      
+      const absoluteX = innerLogicalX + position.x + 10;
+      const absoluteY = innerLogicalY + position.y + 100;
+
+
+      const pinIcon = await createTauriIcon(`<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>`);
+      const unpinIcon = await createTauriIcon(`<line x1="2" y1="2" x2="22" y2="22"/><path d="M12 17v5"/><path d="M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89"/><path d="M9.5 9.5V10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12"/><path d="M14 14l-1.5-1.5"/>`);
+      const homeIcon = await createTauriIcon(`<path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>`);
+      const copyIcon = await createTauriIcon(`<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>`);
+      const xCircleIcon = await createTauriIcon(`<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>`);
+      const xIcon = await createTauriIcon(`<path d="M18 6 6 18"/><path d="m6 6 12 12"/>`);
+
+      const items = [];
+      
+      if (sitePinned) {
+        items.push(await IconMenuItem.new({ text: text("web.tab.unpin"), icon: unpinIcon, action: () => emit('tab-menu-action', { tabId: tab.id, action: 'unpin' }) }));
+      } else {
+        items.push(await IconMenuItem.new({ text: text("web.tab.pin"), icon: pinIcon, action: () => emit('tab-menu-action', { tabId: tab.id, action: 'pin' }) }));
+      }
+      
+      items.push(await IconMenuItem.new({ text: text("web.tab.addHome"), icon: homeIcon, action: () => emit('tab-menu-action', { tabId: tab.id, action: 'shortcut' }) }));
+      items.push(await IconMenuItem.new({ text: text("web.tab.duplicate"), icon: copyIcon, action: () => emit('tab-menu-action', { tabId: tab.id, action: 'duplicate' }) }));
+      items.push(await IconMenuItem.new({ text: text("web.tab.closeOthers"), icon: xCircleIcon, action: () => emit('tab-menu-action', { tabId: tab.id, action: 'close-others' }) }));
+      
+      if (!sitePinned) {
+        items.push(await IconMenuItem.new({ text: text("web.tab.close"), icon: xIcon, action: () => emit('tab-menu-action', { tabId: tab.id, action: 'close' }) }));
+      }
+
+      const menu = await Menu.new({ items });
+      await menu.popup(new LogicalPosition(absoluteX, absoluteY), currentWin);
+    } catch (err) {
+      console.error("Native Tab menu error:", err);
+    }
+  }, [isSitePinned]);
+
+  const closeTabContextMenu = useCallback(() => {
+    setTabContextMenu(null);
+  }, []);
+
+  const closePinnedSiteContextMenu = useCallback(() => {
+    setPinnedSiteContextMenu(null);
+  }, []);
+
+  const runTabContextMenuAction = useCallback((tabId: string, action: "pin" | "unpin" | "shortcut" | "duplicate" | "close-others" | "close") => {
+    closeTabContextMenu();
+    if (action === "pin") tabMenuActionsRef.current.pin(tabId);
+    else if (action === "unpin") tabMenuActionsRef.current.unpin(tabId);
+    else if (action === "shortcut") tabMenuActionsRef.current.shortcut(tabId);
+    else if (action === "duplicate") tabMenuActionsRef.current.duplicate(tabId);
+    else if (action === "close-others") tabMenuActionsRef.current.closeOthers(tabId);
+    else if (action === "close") void tabMenuActionsRef.current.close(tabId);
+  }, [closeTabContextMenu]);
+
+  useEffect(() => {
+    if (!tabContextMenu && !pinnedSiteContextMenu) return undefined;
+    const close = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest(".web-tab-context-menu")) return;
+      closeTabContextMenu();
+      closePinnedSiteContextMenu();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeTabContextMenu();
+        closePinnedSiteContextMenu();
+      }
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [closePinnedSiteContextMenu, closeTabContextMenu, pinnedSiteContextMenu, tabContextMenu]);
 
   useEffect(() => {
     document.documentElement.lang = webSettings.language;
@@ -4133,18 +5037,19 @@ export function App() {
   }, [nativeAudioMode]);
 
   const applyCurrentWebDaliEffects = useCallback((reason = "runtime") => {
-    if (!isTauriRuntime()) return Promise.resolve();
+    if (!isTauriRuntime() || appClosingRef.current) return Promise.resolve();
     const snapshot = loadScopedSfxBroadcast("web");
-    return applyWebDaliEffects(toWebDaliPayload(snapshot)).catch((error) => {
+    return applyWebDaliEffects((window as any).__ardali_activeTabId || '', toWebDaliPayload(snapshot)).catch((error) => {
+      if (appClosingRef.current) return;
       reportClientError(`web.dali.${reason}`, error);
     });
   }, []);
 
   const scheduleCurrentWebDaliEffects = useCallback((reason = "runtime") => {
-    if (!isTauriRuntime()) return;
-    [120, 450, 950, 1800, 3200].forEach((delay) => {
+    if (!isTauriRuntime() || appClosingRef.current) return;
+    [120, 450, 950, 1800, 3200, 6500, 10000, 15000, 19000, 25000, 35000].forEach((delay) => {
       window.setTimeout(() => {
-        if (pageRef.current === "web") void applyCurrentWebDaliEffects(`${reason}-${delay}`);
+        if (!appClosingRef.current && pageRef.current === "web") void applyCurrentWebDaliEffects(`${reason}-${delay}`);
       }, delay);
     });
   }, [applyCurrentWebDaliEffects]);
@@ -4153,13 +5058,13 @@ export function App() {
     void loadArdaliStoreItems()
       .then((items) => {
         setStoreItems(items);
-        setStoreStatus(items.length ? `${items.length} resmi eklenti hazır.` : "Mağaza kataloğu boş.");
+        setStoreStatus(items.length ? formatLabel(text("web.store.itemsReady"), { count: items.length }) : text("web.store.empty"));
       })
       .catch((error) => {
         reportClientError("ardali-store.load", error);
-        setStoreStatus("Mağaza kataloğu okunamadı.");
+        setStoreStatus(text("web.store.loadFailed"));
       });
-  }, []);
+  }, [text]);
 
   const scheduleOfficialPluginsForUrl = useCallback((url: string, reason = "runtime") => {
     if (!isTauriRuntime() || !url) return;
@@ -4169,6 +5074,30 @@ export function App() {
         void applyOfficialPluginsForUrl(url).catch((error) => reportClientError(`ardali-store.apply.${reason}`, error));
       }, delay);
     });
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return undefined;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void listen<{ tabId?: string; action?: string }>("tab-menu-action", (event) => {
+      const tabId = event.payload?.tabId;
+      const action = event.payload?.action;
+      if (!tabId || !action) return;
+      if (action === "pin") tabMenuActionsRef.current.pin(tabId);
+      else if (action === "unpin") tabMenuActionsRef.current.unpin(tabId);
+      else if (action === "shortcut") tabMenuActionsRef.current.shortcut(tabId);
+      else if (action === "duplicate") tabMenuActionsRef.current.duplicate(tabId);
+      else if (action === "close-others") tabMenuActionsRef.current.closeOthers(tabId);
+      else if (action === "close") void tabMenuActionsRef.current.close(tabId);
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   const syncNativeVolume = useCallback(
@@ -4243,8 +5172,10 @@ export function App() {
         if (!next) return;
         const scope = normalizeSfxScope(next.scope || "music");
         if (scope === "web") {
-          if (page === "web") {
-            void applyWebDaliEffects(toWebDaliPayload(next)).catch((error) => reportClientError("web.dali.broadcast", error));
+          if (page === "web" && !appClosingRef.current) {
+            void applyWebDaliEffects((window as any).__ardali_activeTabId || '', toWebDaliPayload(next)).catch((error) => {
+              if (!appClosingRef.current) reportClientError("web.dali.broadcast", error);
+            });
           }
           return;
         }
@@ -4269,8 +5200,10 @@ export function App() {
       if (!next) return;
       const scope = normalizeSfxScope(next.scope || "music");
       if (scope === "web") {
-        if (page === "web") {
-          void applyWebDaliEffects(toWebDaliPayload(next)).catch((error) => reportClientError("web.dali.event", error));
+        if (page === "web" && !appClosingRef.current) {
+          void applyWebDaliEffects((window as any).__ardali_activeTabId || '', toWebDaliPayload(next)).catch((error) => {
+            if (!appClosingRef.current) reportClientError("web.dali.event", error);
+          });
         }
         return;
       }
@@ -4306,13 +5239,14 @@ export function App() {
     void listen<string>("webview-load-failed", (event) => {
       if (pageRef.current !== "web") return;
       const platformName = platforms.find((platform) => platform.id === activeWebPlatformIdRef.current)?.name ?? "Web";
-      setWebRuntimeStatus(`${platformName} yuklenemedi. Yeniden deneniyor... ${event.payload}`);
+      setWebRuntimeStatus(formatLabel(text("web.loadRetryFailed"), { name: platformName, message: event.payload }));
+      setTabs(prev => prev.map(tab => ({ ...tab, isLoading: false })));
       reportClientError("webview.load-failed", event.payload);
     }).then((dispose) => {
       unlisten = dispose;
     });
     return () => unlisten?.();
-  }, []);
+  }, [text]);
 
   useEffect(() => {
     refreshStoreItems();
@@ -4394,7 +5328,6 @@ export function App() {
           activeWebPlatformIdRef.current = restoredWebPlatformId;
           lastWebPlatformIdRef.current = restoredWebPlatformId;
           setActiveWebPlatformId(restoredWebPlatformId);
-          addOpenedWebPlatform(restoredWebPlatformId);
         }
         const shouldRestoreLastSection = startupWebSettings.rememberLastSection && isPageId(playback?.currentPage);
         const requestedPage: PageId = shouldRestoreLastSection ? playback.currentPage! : startupWebSettings.startupPage;
@@ -5153,15 +6086,29 @@ export function App() {
     try {
       let urlToPass = "";
       if (page === "web") {
+        const activeLabel = (window as any).__ardali_activeTabId || activeTabId || activeTab?.id || "main";
         try {
-          const currentUrl = await invoke<string>("get_current_webview_url");
-          urlToPass = currentUrl;
+          const activeContentUrl = await invoke<string>("get_active_web_content_url", { label: activeLabel });
+          urlToPass = activeContentUrl;
         } catch (e) {
-          console.warn("Failed to get webview url:", e);
-          const platform = platforms.find((p) => p.id === activeWebPlatformId);
-          if (platform) urlToPass = platform.url;
+          console.warn("Failed to get active web content url:", e);
+          try {
+            const currentUrl = await invoke<string>("get_current_webview_url", { label: activeLabel });
+            urlToPass = isTikTokFeedUrl(currentUrl) ? "" : currentUrl;
+          } catch (urlError) {
+            console.warn("Failed to get webview url:", urlError);
+            if (!isBlankWebUrl(activeTab?.url) && !isTikTokFeedUrl(activeTab?.url)) {
+              urlToPass = activeTab.url;
+            } else if (currentWebUrl && !isTikTokFeedUrl(currentWebUrl)) {
+              urlToPass = currentWebUrl;
+            } else {
+              const platform = platforms.find((p) => p.id === activeWebPlatformId);
+              if (platform && !isTikTokFeedUrl(platform.url)) urlToPass = platform.url;
+            }
+          }
         }
-        if (!urlToPass) {
+        const isTikTokContext = isTikTokFeedUrl(activeTab?.url) || isTikTokFeedUrl(currentWebUrl) || activeWebPlatformId === "tiktok";
+        if ((!urlToPass || isBlankWebUrl(urlToPass)) && !isTikTokContext) {
           urlToPass = "https://www.youtube.com";
         }
       } else if (page === "music" && selectedTrackData) {
@@ -5199,11 +6146,13 @@ export function App() {
     } catch (err) {
       console.error("Failed to open downloader", err);
     }
-  }, [page, activeWebPlatformId, selectedTrackData, selectedVideoData]);
+  }, [page, activeWebPlatformId, activeTab, activeTabId, currentWebUrl, selectedTrackData, selectedVideoData]);
 
   const openSoundEffectsWindow = useCallback(async () => {
     const scope = page === "video" ? "video" : page === "web" ? "web" : "music";
-    const url = `/?view=sound-effects&scope=${scope}`;
+    const params = new URLSearchParams({ view: "sound-effects", scope });
+    if (scope === "web" && activeTabId) params.set("webTabId", activeTabId);
+    const url = `/?${params.toString()}`;
     const title = getSoundEffectsWindowTitle(scope, webSettings.language);
 
     if (!isTauriRuntime()) {
@@ -5236,7 +6185,7 @@ export function App() {
     } catch (error) {
       reportClientError("sound-effects.open", error);
     }
-  }, [page]);
+  }, [activeTabId, page, webSettings.language]);
 
   const openProjectMWindow = useCallback(async () => {
     if (!isTauriRuntime()) {
@@ -5456,13 +6405,13 @@ export function App() {
       const now = performance.now();
       if (now - lastSent >= 16) {
         lastSent = now;
-        if (page === "web") {
+        if (page === "web" && !appClosingRef.current) {
           if (webPcmRequestInFlight) {
             frame = window.requestAnimationFrame(sendFrame);
             return;
           }
           webPcmRequestInFlight = true;
-          void getWebDaliRawPcm(1024)
+          void getWebDaliRawPcm((window as any).__ardali_activeTabId || '', 1024)
             .then((pcmFrame) => {
               if (!pcmFrame.length) return;
               let peak = 0;
@@ -5727,28 +6676,35 @@ export function App() {
     video.load();
   }, []);
 
+  const closeWebSession = useCallback(() => {
+    hydratedWebTabsRef.current.clear();
+    setWebChromeHidden(false);
+    setWebRuntimeStatus("");
+    if (!isTauriRuntime()) return;
+    void hideAllWeb().catch((error) => reportClientError("web.leave-destroy-all", error));
+  }, []);
+
   const switchPage = useCallback(
     (nextPage: PageId) => {
       if (nextPage === page) return;
       if (nextPage === "web" && !webSettings.enabled) return;
       if (page === "web" && nextPage !== "web") {
-        activeWebPlatformIdRef.current = "";
-        setActiveWebPlatformId("");
-        setWebChromeHidden(false);
-        void hideWeb().catch((error) => reportClientError("web.leave-destroy", error));
+        closeWebSession();
       }
       if (nextPage === "video") {
         closeAudioSession();
+      } else if (nextPage === "web") {
+        closeAudioSession();
+        closeVideoSession();
       } else if (page === "video") {
         closeVideoSession();
       } else if (nextPage !== "music" && nextPage !== "files") {
         closeAudioSession();
         closeVideoSession();
       }
-      if (nextPage === "web") setRailCollapsed(false);
       setPage(nextPage);
     },
-    [closeAudioSession, closeVideoSession, page, webSettings.enabled],
+    [closeAudioSession, closeVideoSession, closeWebSession, page, webSettings.enabled],
   );
 
   const handleOpenWebPlatform = useCallback(async (platform: WebPlatform) => {
@@ -5756,16 +6712,39 @@ export function App() {
     lastWebPlatformIdRef.current = platform.id;
     setActiveWebPlatformId(platform.id);
     addOpenedWebPlatform(platform.id);
-    setWebRuntimeStatus(`${platform.name} yukleniyor...`);
+    setWebRuntimeStatus(formatLabel(text("web.loadingPlatform"), { name: platform.name }));
+
     const platformUrl = webSettings.preferHttps ? platform.url.replace(/^http:/i, "https:") : platform.url;
-    await openPlatform(platformUrl).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      setWebRuntimeStatus(`${platform.name} acilamadi: ${message}`);
-      reportClientError("web.open-platform", error);
-    });
+    const targetTabId = activeTabId || "main";
+    const targetTab = tabs.find((tab) => tab.id === targetTabId);
+    const targetWasBlank = isBlankWebUrl(targetTab?.url);
+    hydratedWebTabsRef.current.add(targetTabId);
+
+    setTabs(prev => prev.map(tab => tab.id === targetTabId ? { ...tab, isLoading: true, url: platformUrl, title: platform.name } : tab));
+
+    if (targetTabId !== "main") {
+      const action = targetWasBlank
+        ? invoke("create_tab", { label: targetTabId, url: platformUrl })
+        : invoke("navigate_tab", { label: targetTabId, url: platformUrl });
+      await action
+        .then(() => invoke("switch_tab", { label: targetTabId }))
+        .then(() => onWindowResize(targetTabId))
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setWebRuntimeStatus(formatLabel(text("web.openFailed"), { name: platform.name, message }));
+          reportClientError("web.open-platform", error);
+        });
+    } else {
+      await openPlatform(platformUrl).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setWebRuntimeStatus(formatLabel(text("web.openFailed"), { name: platform.name, message }));
+        reportClientError("web.open-platform", error);
+      });
+    }
+    scheduleWebviewBoundsSync(targetTabId, "platform-open");
     scheduleCurrentWebDaliEffects("platform-open");
     scheduleOfficialPluginsForUrl(platformUrl, "platform-open");
-  }, [addOpenedWebPlatform, scheduleCurrentWebDaliEffects, scheduleOfficialPluginsForUrl, webSettings.preferHttps]);
+  }, [activeTabId, addOpenedWebPlatform, openPlatform, scheduleCurrentWebDaliEffects, scheduleOfficialPluginsForUrl, scheduleWebviewBoundsSync, tabs, webSettings.preferHttps]);
 
   const handleWebSearchQuery = useCallback(async (queryStr: string) => {
     const query = queryStr.trim();
@@ -5798,12 +6777,76 @@ export function App() {
 
     activeWebPlatformIdRef.current = targetPlatformId;
     setActiveWebPlatformId(targetPlatformId);
-    setWebRuntimeStatus(`Aranıyor...`);
-    await openPlatform(url).catch((error) => {
-      reportClientError("web.search", error);
-    });
+    const targetTabId = activeTabId || "main";
+    const currentTargetTab = tabs.find((tab) => tab.id === targetTabId);
+    const targetWasBlank = isBlankWebUrl(currentTargetTab?.url);
+    hydratedWebTabsRef.current.add(targetTabId);
+
+    setWebRuntimeStatus(text("web.searching"));
+    setTabs(prev => prev.map(tab => tab.id === targetTabId ? { ...tab, isLoading: true, url } : tab));
+    
+    if (targetTabId !== "main") {
+      if (targetWasBlank) {
+        await invoke("create_tab", { label: targetTabId, url }).catch((error) => {
+          reportClientError("web.create-tab-search", error);
+        });
+      } else {
+        await invoke("navigate_tab", { label: targetTabId, url }).catch((error) => {
+          reportClientError("web.search", error);
+        });
+      }
+      await invoke("switch_tab", { label: targetTabId }).catch((error) => {
+        reportClientError("web.search", error);
+      });
+      await onWindowResize(targetTabId);
+    } else {
+      await openPlatform(url).catch((error) => {
+        reportClientError("web.search", error);
+      });
+    }
+    scheduleWebviewBoundsSync(targetTabId, "search");
+    
     (document.activeElement as HTMLElement)?.blur();
-  }, [webSettings.searchEngine, openPlatform]);
+  }, [webSettings.searchEngine, openPlatform, activeTabId, scheduleWebviewBoundsSync, tabs]);
+
+  const handleOpenPinnedSite = useCallback(async (site: WebPinnedSite) => {
+    const existingTab = tabs.find((tab) => tabHostname(tab.url) === site.host);
+    if (existingTab) {
+      await handleSwitchTab(existingTab.id);
+      return;
+    }
+
+    const currentTab = tabs.find((tab) => tab.id === activeTabId);
+    const useCurrentBlank = currentTab && isBlankWebUrl(currentTab.url);
+    const targetTabId = useCurrentBlank
+      ? currentTab.id
+      : `tab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+    hydratedWebTabsRef.current.add(targetTabId);
+    setTabs(prev => {
+      if (useCurrentBlank) {
+        return prev.map(tab => tab.id === targetTabId ? { ...tab, url: site.url, title: site.title, isLoading: true } : tab);
+      }
+      return [...prev, { ...makeBlankWebTab(targetTabId), url: site.url, title: site.title, isLoading: true }];
+    });
+    setActiveTabId(targetTabId);
+    activeWebPlatformIdRef.current = "custom";
+    setActiveWebPlatformId("custom");
+    setWebRuntimeStatus(formatLabel(text("web.loadingPlatform"), { name: site.title }));
+
+    if (targetTabId === "main") {
+      await openPlatform(site.url).catch((error) => reportClientError("web.open-pinned-main", error));
+    } else {
+      await invoke("create_tab", { label: targetTabId, url: site.url })
+        .then(() => invoke("switch_tab", { label: targetTabId }))
+        .catch((error) => reportClientError("web.open-pinned", error));
+    }
+    scheduleWebviewBoundsSync(targetTabId, "pinned-site");
+  }, [activeTabId, handleSwitchTab, openPlatform, scheduleWebviewBoundsSync, tabs]);
+
+  const handleUnpinSite = useCallback((host: string) => {
+    setPinnedSites(prev => prev.filter(site => site.host !== host));
+  }, []);
 
   const handleWebSearch = useCallback(async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -5812,18 +6855,137 @@ export function App() {
     if (query) void handleWebSearchQuery(query);
   }, [handleWebSearchQuery]);
 
-  const openArdaliStore = useCallback(() => {
-    if (activeWebPlatformIdRef.current && activeWebPlatformIdRef.current !== ARDALI_STORE_PLATFORM_ID) {
-      lastWebPlatformIdRef.current = activeWebPlatformIdRef.current;
+  const openPinnedSiteInNewTab = useCallback(async (site: WebPinnedSite) => {
+    const targetTabId = `tab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    hydratedWebTabsRef.current.add(targetTabId);
+    setTabs(prev => [...prev, { ...makeBlankWebTab(targetTabId), url: site.url, title: site.title, isLoading: true }]);
+    setActiveTabId(targetTabId);
+    activeWebPlatformIdRef.current = "custom";
+    setActiveWebPlatformId("custom");
+    setWebRuntimeStatus(formatLabel(text("web.loadingPlatform"), { name: site.title }));
+    await invoke("create_tab", { label: targetTabId, url: site.url })
+      .then(() => invoke("switch_tab", { label: targetTabId }))
+      .then(() => onWindowResize(targetTabId))
+      .catch((error) => reportClientError("web.open-pinned-new-tab", error));
+    scheduleWebviewBoundsSync(targetTabId, "pinned-site-new-tab");
+  }, [scheduleWebviewBoundsSync]);
+
+  const openPinnedSiteContextMenu = useCallback(async (site: WebPinnedSite, event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      const { Menu } = await import('@tauri-apps/api/menu');
+      const { IconMenuItem } = await import('@tauri-apps/api/menu/iconMenuItem');
+      const { LogicalPosition } = await import('@tauri-apps/api/dpi');
+      const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+      
+      const currentWin = getCurrentWebviewWindow();
+      const innerPos = await currentWin.innerPosition();
+      const scaleFactor = await currentWin.scaleFactor();
+      
+      const innerLogicalX = innerPos.x / scaleFactor;
+      const innerLogicalY = innerPos.y / scaleFactor;
+      
+      const absoluteX = innerLogicalX + event.clientX;
+      const absoluteY = innerLogicalY + event.clientY + 100;
+
+      const openIcon = await createTauriIcon(`<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>`);
+      const openNewTabIcon = await createTauriIcon(`<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><line x1="12" y1="10" x2="12" y2="16"/><line x1="9" y1="13" x2="15" y2="13"/>`);
+      const copyIcon = await createTauriIcon(`<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>`);
+      const unpinIcon = await createTauriIcon(`<line x1="2" y1="2" x2="22" y2="22"/><path d="M12 17v5"/><path d="M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89"/><path d="M9.5 9.5V10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12"/><path d="M14 14l-1.5-1.5"/>`);
+
+      const items = [];
+      items.push(await IconMenuItem.new({ text: text("web.open"), icon: openIcon, action: () => void handleWebSearchQuery(site.url) }));
+      items.push(await IconMenuItem.new({ text: text("web.openNewTab"), icon: openNewTabIcon, action: () => void openPinnedSiteInNewTab(site) }));
+      items.push(await IconMenuItem.new({ text: text("web.copyLink"), icon: copyIcon, action: () => void navigator.clipboard?.writeText(site.url).catch(e => reportClientError("web.copy-pinned-url", e)) }));
+      items.push(await IconMenuItem.new({ text: text("web.removePinned"), icon: unpinIcon, action: () => handleUnpinSite(site.host) }));
+
+      const menu = await Menu.new({ items });
+      await menu.popup(new LogicalPosition(absoluteX, absoluteY), currentWin);
+    } catch (err) {
+      console.error("Native pinned site menu error:", err);
     }
+  }, [handleWebSearchQuery, openPinnedSiteInNewTab, handleUnpinSite]);
+
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    if (!libraryLoaded || page !== "web" || !webSettings.enabled) return;
+    if (isArdaliStoreTabUrl(activeTab.url)) {
+      activeWebPlatformIdRef.current = ARDALI_STORE_PLATFORM_ID;
+      setActiveWebPlatformId(ARDALI_STORE_PLATFORM_ID);
+      setCurrentWebUrl("");
+      refreshStoreItems();
+      void parkWeb(activeTab.id || "main").catch((error) => reportClientError("ardali-store.restore-park", error));
+      return;
+    }
+    if (activeWebPlatformId === ARDALI_STORE_PLATFORM_ID || activeTabShowsSearch) return;
+
+    const tabId = activeTab.id || "main";
+    const tabUrl = activeTab.url;
+    if (hydratedWebTabsRef.current.has(tabId)) return;
+    hydratedWebTabsRef.current.add(tabId);
+
+    let disposed = false;
+    const hydrateActiveTab = async () => {
+      try {
+        if (tabId === "main") {
+          await openPlatform(tabUrl);
+        } else {
+          await invoke("create_tab", { label: tabId, url: tabUrl });
+          if (disposed) return;
+          await invoke("switch_tab", { label: tabId });
+          if (disposed) return;
+          await onWindowResize(tabId);
+        }
+        if (!disposed) {
+          setWebRuntimeStatus("");
+          setTabs(prev => prev.map(tab => tab.id === tabId ? { ...tab, isLoading: false } : tab));
+        }
+      } catch (error) {
+        if (!disposed) reportClientError("web.restore-tab", error);
+      }
+    };
+
+    void hydrateActiveTab();
+    return () => {
+      disposed = true;
+    };
+  }, [activeTab.id, activeTab.url, activeTabShowsSearch, activeWebPlatformId, libraryLoaded, openPlatform, page, refreshStoreItems, webSettings.enabled]);
+
+  const openArdaliStore = useCallback(() => {
+    const previousTabId = activeTabId;
+    const existingStoreTab = tabs.find((tab) => isArdaliStoreTabUrl(tab.url));
+    const currentTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+    const hasOpenedWebTab = tabs.some((tab) => !isBlankWebUrl(tab.url) && !isArdaliStoreTabUrl(tab.url));
+    const useCurrentBlank = Boolean(currentTab && isBlankWebUrl(currentTab.url) && !hasOpenedWebTab);
+    const targetTabId = existingStoreTab?.id ?? (useCurrentBlank && currentTab ? currentTab.id : `tab_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`);
+
+    if (activeWebPlatformIdRef.current && activeWebPlatformIdRef.current !== ARDALI_STORE_PLATFORM_ID) lastWebPlatformIdRef.current = activeWebPlatformIdRef.current;
+    setTabs((prev) => {
+      if (existingStoreTab) return prev;
+      const storeTab = makeStoreWebTab(targetTabId);
+      if (useCurrentBlank && currentTab) return prev.map((tab) => tab.id === targetTabId ? storeTab : tab);
+      return [...prev, storeTab];
+    });
+    setActiveTabId(targetTabId);
+    (window as any).__ardali_activeTabId = targetTabId;
     activeWebPlatformIdRef.current = ARDALI_STORE_PLATFORM_ID;
     setActiveWebPlatformId(ARDALI_STORE_PLATFORM_ID);
-    setWebChromeHidden(false);
+    setCurrentWebUrl("");
+    setWebRuntimeStatus("");
     refreshStoreItems();
-    void parkWeb().catch((error) => reportClientError("ardali-store.park-web", error));
-  }, [refreshStoreItems]);
+    if (previousTabId && previousTabId !== targetTabId) {
+      void parkWeb(previousTabId).catch((error) => reportClientError("ardali-store.park-web", error));
+    }
+  }, [activeTabId, refreshStoreItems, tabs]);
 
   const closeArdaliStore = useCallback(() => {
+    const storeTab = tabs.find((tab) => tab.id === activeTabId && isArdaliStoreTabUrl(tab.url)) ?? tabs.find((tab) => isArdaliStoreTabUrl(tab.url));
+    if (storeTab) {
+      void handleCloseTab(storeTab.id);
+      return;
+    }
     const fallbackPlatform =
       platforms.find((platform) => platform.id === lastWebPlatformIdRef.current)
       ?? platforms.find((platform) => platform.id === webSettings.defaultPlatformId)
@@ -5832,46 +6994,48 @@ export function App() {
     activeWebPlatformIdRef.current = fallbackPlatform.id;
     lastWebPlatformIdRef.current = fallbackPlatform.id;
     setActiveWebPlatformId(fallbackPlatform.id);
-    setWebChromeHidden(false);
     window.requestAnimationFrame(() => {
-      void onWindowResize().catch((error) => reportClientError("ardali-store.close-resize", error));
+      void onWindowResize((window as any).__ardali_activeTabId || '').catch((error) => reportClientError("ardali-store.close-resize", error));
     });
-  }, [webSettings.defaultPlatformId]);
+  }, [activeTabId, tabs, webSettings.defaultPlatformId]);
 
   const handleInstallPlugin = useCallback((pluginId: string, installed: boolean) => {
-    setStoreStatus(installed ? "Eklenti güvenlik doğrulamasından geçiriliyor..." : "Eklenti kaldırılıyor...");
+    setStoreStatus(installed ? text("web.store.verifying") : text("web.store.removing"));
     void setPluginInstalled(pluginId, installed)
       .then(() => {
-        setStoreStatus(installed ? "Eklenti kuruldu. Uyumlu platform açıldığında çalışacak." : "Eklenti kaldırıldı.");
+        setStoreStatus(installed ? text("web.store.installed") : text("web.store.removed"));
         void refreshStoreItems();
       })
       .catch((error) => {
-        setStoreStatus(`Eklenti kurulamadı: ${String(error)}`);
+        setStoreStatus(formatLabel(text("web.store.installFailed"), { message: String(error) }));
       });
-  }, [refreshStoreItems]);
+  }, [refreshStoreItems, text]);
 
   const handleTogglePlugin = useCallback((pluginId: string, enabled: boolean) => {
     setPluginEnabled(pluginId, enabled);
-    setStoreStatus(enabled ? "Eklenti etkinleştirildi." : "Eklenti devre dışı bırakıldı.");
+    setStoreStatus(enabled ? text("web.store.enabled") : text("web.store.disabled"));
     const platform = platforms.find((item) => item.id === activeWebPlatformIdRef.current);
     if (enabled && platform) {
       const platformUrl = webSettings.preferHttps ? platform.url.replace(/^http:/i, "https:") : platform.url;
       scheduleOfficialPluginsForUrl(platformUrl, "toggle");
     }
-  }, [scheduleOfficialPluginsForUrl, webSettings.preferHttps]);
+  }, [scheduleOfficialPluginsForUrl, text, webSettings.preferHttps]);
 
   useEffect(() => {
     if (page !== "web" || webSettings.enabled) return;
     setPage("music");
-    void hideWeb().catch((error) => reportClientError("web.disabled-hide", error));
-  }, [page, webSettings.enabled]);
+    closeWebSession();
+  }, [closeWebSession, page, webSettings.enabled]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
     if (!libraryLoaded) return;
     if (page === "web" && webSettings.enabled) {
       if (activeWebPlatformIdRef.current === ARDALI_STORE_PLATFORM_ID) {
-        void parkWeb().catch((error) => reportClientError("ardali-store.open-active", error));
+        void parkWeb((window as any).__ardali_activeTabId || '').catch((error) => reportClientError("ardali-store.open-active", error));
+        return;
+      }
+      if (!activeTabShowsSearch) {
         return;
       }
       if (activeWebPlatformIdRef.current === "custom" || activeWebPlatformIdRef.current === "search") {
@@ -5909,9 +7073,9 @@ export function App() {
       return;
     }
 
-    const closeInactiveWeb = webSettings.suspendWhenInactive ? hideWeb : parkWeb;
-    void closeInactiveWeb().catch((error) => reportClientError(webSettings.suspendWhenInactive ? "web.hide" : "web.park", error));
+    closeWebSession();
   }, [
+    closeWebSession,
     libraryLoaded,
     page,
     webSettings.autoRecover,
@@ -5919,7 +7083,7 @@ export function App() {
     webSettings.enabled,
     webSettings.preferHttps,
     webSettings.startupDelayMs,
-    webSettings.suspendWhenInactive,
+    activeTabShowsSearch,
     scheduleCurrentWebDaliEffects,
     scheduleOfficialPluginsForUrl,
   ]);
@@ -5928,12 +7092,12 @@ export function App() {
     if (!isTauriRuntime()) return;
     const handleResize = () => {
       if (page !== "web") return;
-      if (webChromeHidden) {
-        void setWebChromeVisibility(true).catch((error) => reportClientError("web.resize-hidden", error));
+      if (webFullscreenRef.current && webChromeHidden) {
+        void setWebChromeVisibility((window as any).__ardali_activeTabId || '', true).catch((error) => reportClientError("web.resize-hidden", error));
         return;
       }
 
-      void onWindowResize().catch((error) => reportClientError("web.resize", error));
+      void onWindowResize((window as any).__ardali_activeTabId || '').catch((error) => reportClientError("web.resize", error));
     };
 
     window.addEventListener("resize", handleResize);
@@ -5950,8 +7114,6 @@ export function App() {
         window.clearTimeout(webChromeBoundsTimerRef.current);
         webChromeBoundsTimerRef.current = null;
       }
-      setWebChromeHidden(false);
-      webChromeHiddenTargetRef.current = false;
       return;
     }
 
@@ -5964,7 +7126,7 @@ export function App() {
         window.clearTimeout(webChromeBoundsTimerRef.current);
         webChromeBoundsTimerRef.current = null;
       }
-      void setWebChromeVisibility(false).catch((error) => reportClientError("web.chrome-visible", error));
+      void setWebChromeVisibility((window as any).__ardali_activeTabId || '', false).catch((error) => reportClientError("web.chrome-visible", error));
       return;
     }
 
@@ -5990,26 +7152,26 @@ export function App() {
         webChromeBoundsTimerRef.current = window.setTimeout(() => {
           webChromeBoundsTimerRef.current = null;
           if (disposed) return;
-          void setWebChromeVisibility(true).catch((error) => reportClientError("web.chrome-hide", error));
+          void setWebChromeVisibility((window as any).__ardali_activeTabId || '', true).catch((error) => reportClientError("web.chrome-hide", error));
         }, hideAnimationMs);
         return;
       }
 
-      void setWebChromeVisibility(false).catch((error) => reportClientError("web.chrome-show", error));
+      void setWebChromeVisibility((window as any).__ardali_activeTabId || '', false).catch((error) => reportClientError("web.chrome-show", error));
       window.requestAnimationFrame(() => {
         if (!disposed) setWebChromeHidden(false);
       });
     };
 
     const syncChromeWithFocus = () => {
-      applyHidden(webFullscreenRef.current);
+      if (webFullscreenRef.current) applyHidden(true);
     };
 
     const refreshAuxiliaryFocus = async () => {
       // Logic removed since we no longer auto hide on auxiliary window focus loss
     };
 
-    applyHidden(webFullscreenRef.current);
+    if (webFullscreenRef.current) applyHidden(true);
 
     const revealChromeFromActivity = () => {
       // Logic removed since it was tied to pointer motion revealing auto-hidden chrome
@@ -6070,9 +7232,6 @@ export function App() {
         webChromeHideTimerRef.current = null;
       }
       clearBoundsTimer();
-      setWebChromeHidden(false);
-      webChromeHiddenTargetRef.current = false;
-      void setWebChromeVisibility(false).catch((error) => reportClientError("web.chrome-cleanup", error));
     };
   }, [libraryLoaded, page, webSettings.autoHideChrome, webSettings.chromeAutoHideDelayMs, webSettings.lowPowerMode, webSettings.motionPreset]);
 
@@ -7649,26 +8808,34 @@ export function App() {
         <div className={`nav-bar ${page === "web" ? "web-platform-bar" : ""}`}>
           {page === "web" ? (
             <>
-              {activeWebPlatformId !== ARDALI_STORE_PLATFORM_ID ? (
-                <div className="web-history-controls" aria-label="Web gezinme kontrolleri" style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+                  <div className="web-history-controls" aria-label={text("web.menu")} style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
                   <button
                     className={`web-history-btn floating-menu-btn ${!webChromeHidden ? "menu-open" : ""}`}
                     onClick={() => {
                       const nextHidden = !webChromeHidden;
                       setWebChromeHidden(nextHidden);
                       webChromeHiddenTargetRef.current = nextHidden;
+                      try {
+                        localStorage.setItem(WEB_CHROME_HIDDEN_STORAGE_KEY, String(nextHidden));
+                      } catch {}
                       if (isTauriRuntime()) {
-                        setTimeout(() => void onWindowResize().catch(() => {}), 300);
+                        setTimeout(() => {
+                          const tabId = (window as any).__ardali_activeTabId || '';
+                          const sync = nextHidden && webFullscreenRef.current
+                            ? setWebChromeVisibility(tabId, true)
+                            : onWindowResize(tabId);
+                          void sync.catch(() => {});
+                        }, 300);
                       }
                     }}
-                    title="Menü"
-                    aria-label="Menü"
+                    title={text("web.menu")}
+                    aria-label={text("web.menu")}
                   >
                     <img src="/downloader/icons/app/ardali_dawlod_menu.png" alt="Menu" style={{ width: "20px", height: "20px" }} />
                   </button>
                   <button
                     className="web-history-btn"
-                    onClick={() => void navigateWebHistory("back").catch((error) => reportClientError("web.history-back", error))}
+                    onClick={() => void navigateWebHistory((window as any).__ardali_activeTabId || '', "back").catch((error) => reportClientError("web.history-back", error))}
                     title={text("nav.back")}
                     aria-label={text("nav.back")}
                   >
@@ -7676,7 +8843,7 @@ export function App() {
                   </button>
                   <button
                     className="web-history-btn"
-                    onClick={() => void navigateWebHistory("forward").catch((error) => reportClientError("web.history-forward", error))}
+                    onClick={() => void navigateWebHistory((window as any).__ardali_activeTabId || '', "forward").catch((error) => reportClientError("web.history-forward", error))}
                     title={text("nav.forward")}
                     aria-label={text("nav.forward")}
                   >
@@ -7684,30 +8851,53 @@ export function App() {
                   </button>
                   <button
                     className="web-history-btn"
-                    onClick={() => {
-                      if (isTauriRuntime()) {
-                        invoke("run_script_in_web", { script: "location.reload();" }).catch(() => {});
-                      }
-                    }}
-                    title="Yenile"
-                    aria-label="Yenile"
+                    onClick={() => void reloadWeb((window as any).__ardali_activeTabId || '').catch((error) => reportClientError("web.reload", error))}
+                    title={text("nav.refresh")}
+                    aria-label={text("nav.refresh")}
                   >
                     <RotateCw size={18} />
                   </button>
                   <button
                     className="web-history-btn"
-                    onClick={() => {
-                      activeWebPlatformIdRef.current = "search";
-                      setActiveWebPlatformId("search");
-                      void parkWeb().catch((e) => reportClientError("web.park", e));
-                    }}
-                    title="Ana Sayfa"
-                    aria-label="Ana Sayfa"
+                    onClick={showNewTabPageInCurrentTab}
+                    title={text("web.home")}
+                    aria-label={text("web.home")}
                   >
                     <Home size={18} />
                   </button>
-                </div>
-              ) : null}
+                  {pinnedSites.length ? (
+                    <div className={`web-pinned-sites-shell ${pinnedSitesOpen ? "open" : "closed"}`} aria-label={text("web.pinnedSites")}>
+                      <div className="web-pinned-sites-clip" aria-hidden={!pinnedSitesOpen}>
+                        <div className="web-pinned-sites">
+                          {pinnedSites.map((site) => (
+                            <button
+                              className="web-pinned-site-btn"
+                              key={site.host}
+                              onClick={() => void handleOpenPinnedSite(site)}
+                              onContextMenu={(event) => {
+                                void openPinnedSiteContextMenu(site, event);
+                              }}
+                              title={formatLabel(text("web.pinnedSiteOptions"), { title: site.title })}
+                              aria-label={site.title}
+                            >
+                              <img src={webFaviconUrl(site.url, site.host)} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <button
+                        className="web-pinned-sites-toggle"
+                        type="button"
+                        onClick={togglePinnedSitesOpen}
+                        title={pinnedSitesOpen ? text("web.hidePinnedSites") : text("web.showPinnedSites")}
+                        aria-label={pinnedSitesOpen ? text("web.hidePinnedSites") : text("web.showPinnedSites")}
+                        aria-expanded={pinnedSitesOpen}
+                      >
+                        {pinnedSitesOpen ? <ChevronLeft size={14} /> : <ChevronRight size={14} />}
+                      </button>
+                    </div>
+                  ) : null}
+              </div>
 
               {/* BRAVE-STYLE TABS */}
               <div style={{ display: "flex", alignItems: "center", flex: 1, gap: "4px", overflowX: "auto", margin: "0 12px", scrollbarWidth: "none" }}>
@@ -7752,7 +8942,7 @@ export function App() {
                       }}
                     >
                       <img
-                        src={`/icons/web-platforms/${platform.icon}`}
+                        src={webFaviconUrl(platform.url)}
                         alt={platform.name}
                         style={{ width: "16px", height: "16px", objectFit: "contain", flexShrink: 0, opacity: isActive ? 1 : 0.6 }}
                       />
@@ -7777,10 +8967,10 @@ export function App() {
                           if (isActive) {
                             activeWebPlatformIdRef.current = "search";
                             setActiveWebPlatformId("search");
-                            void parkWeb().catch(() => {});
+                            void parkWeb((window as any).__ardali_activeTabId || '').catch(() => {});
                           }
                         }}
-                        title="Kapat"
+                        title={text("web.close")}
                         style={{
                           opacity: 0,
                           width: "18px",
@@ -7818,13 +9008,9 @@ export function App() {
                 />
                 <button
                   type="button"
-                  onClick={() => {
-                    activeWebPlatformIdRef.current = "search";
-                    setActiveWebPlatformId("search");
-                    void parkWeb().catch((e) => reportClientError("web.park", e));
-                  }}
-                  title="Yeni Sekme"
-                  aria-label="Yeni Sekme"
+                  onClick={() => void handleAddTab()}
+                  title={text("web.newTab")}
+                  aria-label={text("web.newTab")}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -7843,6 +9029,23 @@ export function App() {
                   onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
                 >
                   <Plus size={18} />
+                </button>
+                <button
+                  type="button"
+                  className={`web-platform-btn web-store-btn ${activeWebPlatformId === ARDALI_STORE_PLATFORM_ID ? "active" : ""}`}
+                  onClick={openArdaliStore}
+                  title={text("web.storeTitle")}
+                  aria-label={text("web.storeTitle")}
+                  style={{
+                    width: "32px",
+                    height: "32px",
+                    flex: "0 0 auto",
+                    marginLeft: "6px",
+                    borderRadius: "8px",
+                    borderBottom: activeWebPlatformId === ARDALI_STORE_PLATFORM_ID ? "2px solid var(--accent, #00c8ff)" : "2px solid transparent",
+                  }}
+                >
+                  <Store size={17} />
                 </button>
               </div>
 
@@ -7926,16 +9129,55 @@ export function App() {
 
         {page === "web" && (
           <TabBar 
-            tabs={tabs} 
+            tabs={tabs.map((tab) => ({
+              ...tab,
+              title: isArdaliStoreTabUrl(tab.url)
+                ? text("web.storeTitle")
+                : isBlankWebUrl(tab.url) || tab.title === "Yeni Sekme"
+                  ? text("web.newTab")
+                  : tab.title,
+            }))} 
             activeTabId={activeTabId} 
             onAddTab={handleAddTab} 
             onCloseTab={handleCloseTab} 
             onSwitchTab={handleSwitchTab} 
+            onOpenTabMenu={(tab, position) => openTabContextMenu(tab as Tab, position)}
           />
         )}
 
+        {page === "web" && tabContextMenu ? (
+          <div
+            className="web-tab-context-menu"
+            role="menu"
+            style={{ left: tabContextMenu.x, top: tabContextMenu.y } as React.CSSProperties}
+          >
+            <button type="button" role="menuitem" onClick={() => runTabContextMenuAction(tabContextMenu.tabId, tabContextMenu.pinned ? "unpin" : "pin")}>
+              <Pin size={15} />
+              <span>{tabContextMenu.pinned ? text("web.tab.unpin") : text("web.tab.pin")}</span>
+            </button>
+            <button type="button" role="menuitem" onClick={() => runTabContextMenuAction(tabContextMenu.tabId, "shortcut")}>
+              <Sparkles size={15} />
+              <span>{text("web.tab.addHome")}</span>
+            </button>
+            <button type="button" role="menuitem" onClick={() => runTabContextMenuAction(tabContextMenu.tabId, "duplicate")}>
+              <FolderPlus size={15} />
+              <span>{text("web.tab.duplicate")}</span>
+            </button>
+            <button type="button" role="menuitem" onClick={() => runTabContextMenuAction(tabContextMenu.tabId, "close-others")}>
+              <Maximize2 size={15} />
+              <span>{text("web.tab.closeOthers")}</span>
+            </button>
+            <button className="danger" type="button" role="menuitem" onClick={() => runTabContextMenuAction(tabContextMenu.tabId, "close")}>
+              <X size={15} />
+              <span>{text("web.tab.close")}</span>
+            </button>
+          </div>
+        ) : null}
+
+
+
         {page === "web" ? (
-        <div className="web-stage" aria-hidden={activeWebPlatformId !== ARDALI_STORE_PLATFORM_ID && activeWebPlatformId !== "search" && !webRuntimeStatus}>
+        <div className="web-stage" aria-hidden={activeWebPlatformId !== ARDALI_STORE_PLATFORM_ID && !activeTabShowsSearch && !webRuntimeStatus}>
           {activeWebPlatformId === ARDALI_STORE_PLATFORM_ID ? (
             <ArdaliStoreView
               items={storeItems}
@@ -7945,7 +9187,7 @@ export function App() {
               onToggle={handleTogglePlugin}
               onClose={closeArdaliStore}
             />
-          ) : activeWebPlatformId === "search" ? (
+          ) : activeTabShowsSearch ? (
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", padding: "24px" }}>
               <img src="/icons/app/ardali_256.png" alt="ArDli Logo" style={{ width: "120px", opacity: 0.8, marginBottom: "32px", borderRadius: "20%" }} />
               <SearchAutocomplete
@@ -7966,7 +9208,62 @@ export function App() {
                 marginTop: "48px",
                 justifyContent: "center"
               }}>
-                {platforms.filter((p) => !hiddenShortcuts.includes(p.id)).slice(0, 8).map((platform) => (
+                <div className="web-shortcuts-title">
+                  {topSites.length > 0 ? text("web.addedPages") : text("web.shortcuts")}
+                </div>
+                {topSites.length > 0 ? topSites.slice(0, 8).map((site) => (
+                  <button
+                    key={site.id}
+                    onClick={() => void handleWebSearchQuery(site.url)}
+                    className="web-shortcut-btn"
+                    title={site.title}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      gap: "12px",
+                      background: "transparent",
+                      border: "none",
+                      color: "var(--text-main)",
+                      cursor: "pointer",
+                      padding: "12px",
+                      borderRadius: "12px",
+                      transition: "background-color 0.2s",
+                      minWidth: 0,
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "var(--bg-light)"}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                  >
+                    <div
+                      className="web-shortcut-remove-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTopSites((prev) => {
+                          const next = prev.filter((item) => item.id !== site.id);
+                          localStorage.setItem(WEB_TOP_SITES_STORAGE_KEY, JSON.stringify(next));
+                          return next;
+                        });
+                      }}
+                      title={text("web.removeShortcut")}
+                      aria-label={text("web.removeShortcut")}
+                    >
+                      <X size={12} />
+                    </div>
+                    <div style={{
+                      width: "48px",
+                      height: "48px",
+                      borderRadius: "50%",
+                      backgroundColor: "var(--bg-light)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      boxShadow: "0 4px 12px rgba(0,0,0,0.1)"
+                    }}>
+                      <img src={`https://www.google.com/s2/favicons?domain=${site.host}&sz=64`} alt="" style={{ width: 26, height: 26, borderRadius: 6 }} />
+                    </div>
+                    <span style={{ fontSize: "12px", textAlign: "center", opacity: 0.8, width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{site.title}</span>
+                  </button>
+                )) : platforms.filter((p) => !hiddenShortcuts.includes(p.id)).slice(0, 8).map((platform) => (
                   <button
                     key={platform.id}
                     onClick={() => void handleOpenWebPlatform(platform)}
@@ -7998,8 +9295,8 @@ export function App() {
                           return next;
                         });
                       }}
-                      title="Kaldır"
-                      aria-label="Kaldır"
+                      title={text("web.removeShortcut")}
+                      aria-label={text("web.removeShortcut")}
                     >
                       <X size={12} />
                     </div>
@@ -8021,7 +9318,11 @@ export function App() {
               </div>
             </div>
           ) : webRuntimeStatus ? (
-            <div className="web-runtime-status" role="status">{webRuntimeStatus}</div>
+            <div className="web-runtime-status" role="status" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '24px' }}>
+              <div style={{ width: '40px', height: '40px', border: '4px solid rgba(255,255,255,0.2)', borderTopColor: '#00a8ff', borderRadius: '50%', animation: 'web-spin 1s linear infinite', marginBottom: '16px' }}></div>
+              <style>{`@keyframes web-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+              <div style={{ fontSize: '14px', color: '#ccc' }}>{webRuntimeStatus}</div>
+            </div>
           ) : null}
         </div>
         ) : (
@@ -8116,9 +9417,11 @@ export function App() {
 }
 
 function SoundEffectsWindow() {
-  const scope = normalizeSfxScope(new URLSearchParams(window.location.search).get("scope") || "music");
+  const query = useMemo(() => new URLSearchParams(window.location.search), []);
+  const scope = normalizeSfxScope(query.get("scope") || "music");
   const initial = useMemo(() => loadSoundEffectsState(scope), [scope]);
   const [webSettings, setWebSettings] = useState<WebSettings>(() => loadWebSettings());
+  const [webSpectrumTabId, setWebSpectrumTabId] = useState(() => query.get("webTabId") || "");
   const [masterEnabled, setMasterEnabled] = useState(initial.masterEnabled);
   const [currentEffect, setCurrentEffect] = useState<SfxEffectId>(initial.currentEffect);
   const [panels, setPanels] = useState<Record<SfxEffectId, SfxPanelDefinition>>(initial.panels);
@@ -8176,6 +9479,24 @@ function SoundEffectsWindow() {
   }, [language, webSettings.theme, webSettings.followSystemTheme, windowTitle]);
 
   useEffect(() => {
+    if (scope !== "web") return undefined;
+    (window as any).__ardali_activeTabId = webSpectrumTabId;
+    let cleanupTauri: (() => void) | undefined;
+    if (isTauriRuntime()) {
+      void listen<string>(activeWebTabChangedEvent, (event) => {
+        const next = typeof event.payload === "string" ? event.payload : "";
+        if (next) {
+          (window as any).__ardali_activeTabId = next;
+          setWebSpectrumTabId(next);
+        }
+      }).then((cleanup) => {
+        cleanupTauri = cleanup;
+      });
+    }
+    return () => cleanupTauri?.();
+  }, [scope, webSpectrumTabId]);
+
+  useEffect(() => {
     const handleLocalSettings = (event: Event) => {
       const detail = (event as CustomEvent<WebSettings>).detail;
       setWebSettings(detail ?? loadWebSettings());
@@ -8220,7 +9541,7 @@ function SoundEffectsWindow() {
       inFlight = true;
       try {
         if (scope === "web") {
-          const raw = await getWebDaliRawSpectrum(96);
+          const raw = webSpectrumTabId ? await getWebDaliRawSpectrum(webSpectrumTabId, 96) : [];
           if (!cancelled) setSfxSpectrum({ processed: raw, raw });
         } else {
           const values = await invoke<NativeSpectrumPair>("native_audio_spectrum_pair", { bands: 96 });
@@ -8238,7 +9559,7 @@ function SoundEffectsWindow() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [scope, spectrumActive]);
+  }, [scope, spectrumActive, webSpectrumTabId]);
 
   useEffect(() => {
     localStorage.setItem(soundEffectsCrossfeedAutoKey, crossfeedAutoHeadphones ? "1" : "0");
@@ -8335,14 +9656,16 @@ function SoundEffectsWindow() {
         // browser yoksa sessiz kal
       }
       if (scope === "web") {
-        void applyWebDaliEffects(toWebDaliPayload(broadcastState)).catch((error) => reportClientError("web.dali.sfx-window-direct", error));
+        if (webSpectrumTabId) {
+          void applyWebDaliEffects(webSpectrumTabId, toWebDaliPayload(broadcastState)).catch((error) => reportClientError("web.dali.sfx-window-direct", error));
+        }
       }
       if (isTauriRuntime()) {
         void emit("ardali-sfx-broadcast", broadcastState).catch(() => undefined);
       }
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [broadcastState, currentEffect, masterEnabled, panels, scope]);
+  }, [broadcastState, currentEffect, masterEnabled, panels, scope, webSpectrumTabId]);
 
   useEffect(() => {
     setSfxBroadcast((current) => {

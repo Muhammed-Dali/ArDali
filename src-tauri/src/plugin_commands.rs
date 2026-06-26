@@ -35,7 +35,11 @@ fn ensure_safe_relative_entry(entry: &str) -> Result<PathBuf, String> {
 async fn fetch_text(url: &str) -> Result<String, String> {
     let response = reqwest::get(url).await.map_err(|e| e.to_string())?;
     if !response.status().is_success() {
-        return Err(format!("Indirme basarisiz: {} ({})", url, response.status()));
+        return Err(format!(
+            "Indirme basarisiz: {} ({})",
+            url,
+            response.status()
+        ));
     }
 
     response.text().await.map_err(|e| e.to_string())
@@ -44,7 +48,11 @@ async fn fetch_text(url: &str) -> Result<String, String> {
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let response = reqwest::get(url).await.map_err(|e| e.to_string())?;
     if !response.status().is_success() {
-        return Err(format!("Indirme basarisiz: {} ({})", url, response.status()));
+        return Err(format!(
+            "Indirme basarisiz: {} ({})",
+            url,
+            response.status()
+        ));
     }
 
     response
@@ -60,10 +68,7 @@ pub async fn install_plugin(plugin_id: String) -> Result<(), String> {
 
     let validator = PluginValidator::new()?;
 
-    let manifest_url = format!(
-        "{}/{}/manifest.json",
-        PLUGIN_REPOSITORY_RAW_BASE, plugin_id
-    );
+    let manifest_url = format!("{}/{}/manifest.json", PLUGIN_REPOSITORY_RAW_BASE, plugin_id);
     let manifest_json = fetch_text(&manifest_url).await?;
     let manifest: PluginManifest =
         serde_json::from_str(&manifest_json).map_err(|e| e.to_string())?;

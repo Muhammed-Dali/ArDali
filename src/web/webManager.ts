@@ -77,16 +77,24 @@ export async function openPlatform(url: string) {
   });
 }
 
-export async function hideWeb() {
-  await invoke("hide_web_view");
+export async function hideWeb(label: string) {
+  await invoke("hide_web_view", { label });
 }
 
-export async function parkWeb() {
-  await invoke("park_web_view");
+export async function hideAllWeb() {
+  await invoke("hide_all_web_views");
 }
 
-export async function navigateWebHistory(direction: "back" | "forward") {
-  await invoke("navigate_web_history", { direction });
+export async function parkWeb(label: string) {
+  await invoke("park_web_view", { label });
+}
+
+export async function navigateWebHistory(label: string, direction: "back" | "forward") {
+  await invoke("navigate_web_history", { label, direction });
+}
+
+export async function reloadWeb(label: string) {
+  await invoke("reload_web_view", { label });
 }
 
 export type WebDaliPayload = {
@@ -110,11 +118,94 @@ try {
   const dbToGain = (db) => Math.pow(10, db / 20);
   const freqs = [20,25,31,40,50,63,80,100,125,160,200,250,315,400,500,630,800,1000,1250,1600,2000,2500,3150,4000,5000,6300,8000,10000,12500,16000,18000,20000];
   const root = window.__ARDALI_DALI_WEB__ || {};
+  const currentHost = String(window.location && window.location.hostname ? window.location.hostname : "").toLowerCase();
+  const isShortVideoPlatform = /(^|\\.)tiktok\\.com$|(^|\\.)instagram\\.com$|(^|\\.)facebook\\.com$/.test(currentHost);
+  const engineProfile = isShortVideoPlatform ? "stable-stream" : "realtime";
   if (!root.graphs) root.graphs = new WeakMap();
+  if (!root.graphRefs) root.graphRefs = new Set();
+  const cfg = {
+    enabled: payload.effectsEnabled !== false,
+    eqGains: Array.isArray(payload.eqGains) ? payload.eqGains.slice(0, 32).map((value) => clamp(value, -12, 12, 0)) : freqs.map(() => 0),
+    dsp: payload.dspSettings && typeof payload.dspSettings === "object" ? payload.dspSettings : {},
+  };
+  const hasMeaningfulProcessing = (() => {
+    const dsp = cfg.dsp || {};
+    if (!cfg.enabled) return false;
+    if (cfg.eqGains.some((value) => Math.abs(Number(value) || 0) > 0.05)) return true;
+    if (Math.abs(Number(dsp.preampDb) || 0) > 0.05) return true;
+    if (Math.abs(Number(dsp.midGain) || 0) > 0.05 || Math.abs(Number(dsp.trebleGain) || 0) > 0.05) return true;
+    if (dsp.bassBoostEnabled !== false && Math.abs(Number(dsp.bassBoost) || 0) > 0.05) return true;
+    if (dsp.peqEnabled || dsp.dynamicEqEnabled || dsp.deesserEnabled || dsp.autoGainEnabled || dsp.noiseGateEnabled) return true;
+    if (dsp.compressorEnabled || dsp.limiterEnabled || dsp.truePeakEnabled) return true;
+    if (dsp.exciterEnabled || dsp.echoEnabled || dsp.reverbEnabled || dsp.convReverbEnabled) return true;
+    if (dsp.crossfeedEnabled || dsp.surroundEnabled || dsp.bassMonoEnabled || dsp.stereoWidenerEnabled) return true;
+    if (dsp.tapeSaturationEnabled || dsp.bitDitherEnabled) return true;
+    if (Math.abs(Number(dsp.balance) || 0) > 0.05) return true;
+    return false;
+  })();
+  if (isShortVideoPlatform && !hasMeaningfulProcessing) {
+    Array.from(root.graphRefs || []).forEach((graph) => {
+      try {
+        if (graph && graph.master && graph.master.gain) {
+          const mediaVolume = graph.media && !graph.media.muted ? clamp(graph.media.volume, 0, 1, 1) : 0;
+          graph.master.gain.value = mediaVolume;
+          graph.suspendedByArDali = false;
+        }
+      } catch (_) {}
+    });
+    root.lastPayload = cfg;
+    root.shortVideoBypass = true;
+    window.__ARDALI_DALI_WEB__ = root;
+    try {
+      console.info("[ArDali DALI WEB]", JSON.stringify({
+        ok: true,
+        connected: 0,
+        bypass: "short-video-native-audio",
+        totalMediaCount: document.querySelectorAll("video, audio").length,
+        host: currentHost,
+      }));
+    } catch (_) {}
+    return {
+      ok: true,
+      connected: 0,
+      bypass: "short-video-native-audio",
+      totalMediaCount: document.querySelectorAll("video, audio").length,
+      contextState: root.context ? root.context.state : "not-created",
+    };
+  }
+  const bootMediaElements = Array.from(document.querySelectorAll("video, audio"));
+  const hasPlaybackCandidate = bootMediaElements.some((media) => {
+    const ready = Number(media && media.readyState || 0);
+    const currentTime = Number(media && media.currentTime || 0);
+    const volume = Number(media && media.volume);
+    return ready >= 2 && !media.paused && !media.muted && volume > 0 && currentTime >= 0;
+  });
+  if (isShortVideoPlatform && !hasPlaybackCandidate) {
+    root.lastPayload = payload;
+    root.deferredUntilPlayback = true;
+    window.__ARDALI_DALI_WEB__ = root;
+    try {
+      console.info("[ArDali DALI WEB]", JSON.stringify({
+        ok: true,
+        connected: 0,
+        deferred: "waiting-for-short-video-playback",
+        totalMediaCount: bootMediaElements.length,
+        host: currentHost,
+      }));
+    } catch (_) {}
+    return {
+      ok: true,
+      connected: 0,
+      deferred: "waiting-for-short-video-playback",
+      totalMediaCount: bootMediaElements.length,
+      contextState: root.context ? root.context.state : "not-created",
+    };
+  }
   if (!root.context) {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextCtor) return { ok: false, error: "audio-context-unavailable" };
-    root.context = new AudioContextCtor({ latencyHint: "interactive" });
+    root.context = new AudioContextCtor({ latencyHint: isShortVideoPlatform ? "playback" : "interactive" });
+    root.contextProfile = engineProfile;
   }
   if (!root.gestureListenersRegistered) {
     root.gestureListenersRegistered = true;
@@ -140,12 +231,6 @@ try {
     root.lastError = "compiled-dali-buildGraph-unavailable";
     return { ok: false, connected: 0, error: root.lastError };
   }
-
-  const cfg = {
-    enabled: payload.effectsEnabled !== false,
-    eqGains: Array.isArray(payload.eqGains) ? payload.eqGains.slice(0, 32).map((value) => clamp(value, -12, 12, 0)) : freqs.map(() => 0),
-    dsp: payload.dspSettings && typeof payload.dspSettings === "object" ? payload.dspSettings : {},
-  };
 
   const collectDaliNodes = (daliGraph) => {
     const chain = Array.isArray(daliGraph && daliGraph.nodes && daliGraph.nodes.chain) ? daliGraph.nodes.chain : [];
@@ -190,6 +275,65 @@ try {
       curve[i] = x * (1 - wet) + quantized * wet;
     }
     return curve;
+  };
+
+  const flattenAudioNodes = (value, out = [], seen = new Set()) => {
+    if (!value) return out;
+    if ((typeof value === "object" || typeof value === "function") && seen.has(value)) return out;
+    if (typeof value === "object" || typeof value === "function") seen.add(value);
+    if (typeof value.disconnect === "function") {
+      if (!out.includes(value)) out.push(value);
+      return out;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => flattenAudioNodes(item, out, seen));
+      return out;
+    }
+    if (value === window || value === document || value.nodeType || value instanceof AudioParam) return out;
+    if (typeof value === "object") {
+      Object.values(value).forEach((item) => flattenAudioNodes(item, out, seen));
+    }
+    return out;
+  };
+
+  const disconnectGraph = (graph) => {
+    if (!graph) return;
+    try {
+      if (graph.daliGraph && typeof graph.daliGraph.disconnect === "function") graph.daliGraph.disconnect();
+    } catch (_) {}
+    try {
+      if (graph.bitNoiseSource && typeof graph.bitNoiseSource.stop === "function") graph.bitNoiseSource.stop();
+    } catch (_) {}
+    flattenAudioNodes(graph).forEach((node) => {
+      try { node.disconnect(); } catch (_) {}
+    });
+    if (graph.media) {
+      try { root.graphs.delete(graph.media); } catch (_) {}
+    }
+    try { root.graphRefs.delete(graph); } catch (_) {}
+  };
+
+  const suspendGraph = (graph) => {
+    if (!graph || !graph.master || !graph.master.gain) return;
+    try {
+      const now = context && Number.isFinite(context.currentTime) ? context.currentTime : 0;
+      graph.master.gain.cancelScheduledValues(now);
+      graph.master.gain.setTargetAtTime(0, now, 0.015);
+      graph.suspendedByArDali = true;
+    } catch (_) {}
+  };
+
+  const cleanupGraphs = (selectedMedia, forceInactive = false) => {
+    const selected = new Set(selectedMedia);
+    Array.from(root.graphRefs || []).forEach((graph) => {
+      const media = graph && graph.media;
+      if (!media || !document.documentElement.contains(media)) {
+        disconnectGraph(graph);
+        return;
+      }
+      const shouldKeep = selected.has(media) || (!forceInactive && isActiveMedia(media));
+      if (!shouldKeep) suspendGraph(graph);
+    });
   };
 
   const makeGraph = (media) => {
@@ -313,6 +457,7 @@ try {
     bitDownsampleFilter.frequency.value = 20000;
     const bitOutput = context.createGain();
     const bitNoiseGain = context.createGain();
+    let bitNoiseSource = null;
     try {
       const noiseBuffer = context.createBuffer(1, Math.max(1, Math.floor(context.sampleRate * 0.5)), context.sampleRate);
       const channel = noiseBuffer.getChannelData(0);
@@ -323,6 +468,7 @@ try {
       noise.connect(bitNoiseGain);
       bitNoiseGain.connect(bitOutput);
       noise.start();
+      bitNoiseSource = noise;
     } catch (_) {}
     const limiterInputGain = context.createGain();
     const limiter = context.createDynamicsCompressor();
@@ -485,6 +631,7 @@ try {
       bitDownsampleFilter,
       bitOutput,
       bitNoiseGain,
+      bitNoiseSource,
       limiterInputGain,
       limiter,
       truePeakDrive,
@@ -513,6 +660,7 @@ try {
       warmUpUntil: 0,
     };
     root.graphs.set(media, graph);
+    root.graphRefs.add(graph);
     return graph;
   };
 
@@ -645,6 +793,10 @@ try {
     graph.width.gain.setTargetAtTime(centerLift * surroundLift, now, 0.018);
     if (graph.panner) graph.panner.pan.setTargetAtTime(enabled ? clamp(dsp.balance, -100, 100, 0) / 100 : 0, now, 0.018);
     const mediaVolume = graph.media?.muted ? 0 : clamp(graph.media?.volume, 0, 1, 1);
+    if (graph.suspendedByArDali) {
+      graph.suspendedByArDali = false;
+      graph.warmUpUntil = 0;
+    }
     if (!graph.warmUpUntil) {
       // First time: fade in from 0 to avoid click/pop; protect for 300 ms
       const rampDuration = 0.3;
@@ -659,7 +811,6 @@ try {
     // else: ramp still in progress, do NOT touch master gain
   };
 
-  const allMediaElements = Array.from(document.querySelectorAll("video, audio"));
   const isActiveMedia = (media) => {
     if (!media) return false;
     const ready = Number(media.readyState || 0);
@@ -667,18 +818,55 @@ try {
     const volume = Number(media.volume);
     return ready >= 2 && !media.paused && !media.muted && volume > 0 && currentTime >= 0;
   };
+  const isGraphCandidateMedia = (media) => {
+    if (!media) return false;
+    const volume = Number(media.volume);
+    if (media.muted || volume <= 0) return false;
+    const tag = String(media.tagName || "").toLowerCase();
+    const ready = Number(media.readyState || 0);
+    const hasSource = Boolean(media.currentSrc || media.src || media.srcObject);
+    return tag === "video" || ready > 0 || hasSource;
+  };
+  const allMediaElements = Array.from(document.querySelectorAll("video, audio"));
   const activeMediaElements = allMediaElements.filter(isActiveMedia);
+  const mediaVisibilityScore = (media) => {
+    try {
+      const rect = media.getBoundingClientRect ? media.getBoundingClientRect() : null;
+      if (!rect || rect.width <= 1 || rect.height <= 1) return 0;
+      const width = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
+      const height = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+      const visibleArea = width * height;
+      const area = Math.max(1, rect.width * rect.height);
+      return Math.min(1, visibleArea / area);
+    } catch (_) {
+      return 0;
+    }
+  };
+  const mediaScore = (media) => {
+    const activeScore = isActiveMedia(media) ? 1000 : 0;
+    const visibility = mediaVisibilityScore(media) * (isShortVideoPlatform ? 500 : 120);
+    const ready = Number(media.readyState || 0) * 8;
+    const size = (() => {
+      try {
+        const rect = media.getBoundingClientRect ? media.getBoundingClientRect() : null;
+        return rect ? Math.min(120, Math.max(0, rect.width * rect.height) / 6000) : 0;
+      } catch (_) {
+        return 0;
+      }
+    })();
+    return activeScore + visibility + ready + size;
+  };
   const selectMediaElements = (items) => {
     const activeItems = items.filter(isActiveMedia);
-    return activeItems
+    const candidateItems = activeItems.length ? activeItems : items.filter(isGraphCandidateMedia);
+    const maxActiveGraphs = isShortVideoPlatform ? 1 : 2;
+    return candidateItems
       .filter((media) => !!media)
-      .sort((a, b) => {
-        const aScore = (isActiveMedia(a) ? 100 : 0) + Number(a.readyState || 0);
-        const bScore = (isActiveMedia(b) ? 100 : 0) + Number(b.readyState || 0);
-        return bScore - aScore;
-      });
+      .sort((a, b) => mediaScore(b) - mediaScore(a))
+      .slice(0, maxActiveGraphs);
   };
   const mediaElements = selectMediaElements(allMediaElements);
+  cleanupGraphs(mediaElements, isShortVideoPlatform);
   let connected = 0;
   let mediaCount = mediaElements.length;
   for (const media of mediaElements) {
@@ -702,9 +890,9 @@ try {
     root.mediaEventListeners.add(media);
     const refresh = () => {
       clearTimeout(root.mediaEventTimer);
-      root.mediaEventTimer = setTimeout(() => root.applyCurrent && root.applyCurrent(), 100);
+      root.mediaEventTimer = setTimeout(() => root.applyCurrent && root.applyCurrent(), 0);
     };
-    ["loadedmetadata", "loadeddata", "canplay", "play", "playing", "volumechange"].forEach((eventName) => {
+    ["loadstart", "loadedmetadata", "loadeddata", "canplay", "play", "playing", "volumechange"].forEach((eventName) => {
       media.addEventListener(eventName, refresh, { passive: true });
     });
   };
@@ -712,8 +900,10 @@ try {
   root.applyCurrent = () => {
     const currentMedia = Array.from(document.querySelectorAll("video, audio"));
     currentMedia.forEach(bindMediaEvents);
+    const selectedMedia = selectMediaElements(currentMedia);
+    cleanupGraphs(selectedMedia, isShortVideoPlatform);
     let count = 0;
-    for (const media of selectMediaElements(currentMedia)) {
+    for (const media of selectedMedia) {
       try {
         const graph = makeGraph(media);
         if (graph) {
@@ -819,7 +1009,7 @@ try {
     })),
     error: root.lastError || "",
   };
-  try { console.log("[ArDali DALI WEB]", JSON.stringify(result)); } catch (_) {}
+  try { console.info("[ArDali DALI WEB]", JSON.stringify(result)); } catch (_) {}
   return result;
 } catch (error) {
   const result = {
@@ -837,30 +1027,31 @@ try {
 `;
 }
 
-export async function applyWebDaliEffects(payload: WebDaliPayload) {
-  await invoke("apply_web_dali_script", { script: webDaliInjectionScript(payload) });
+export async function applyWebDaliEffects(label: string, payload: WebDaliPayload) {
+  await invoke("apply_web_dali_script", { label, script: webDaliInjectionScript(payload) });
 }
 
-export async function getWebDaliRawSpectrum(bands: number) {
-  const snapshot = await invoke<string>("web_dali_audio_snapshot", { kind: "raw-spectrum", size: bands });
+export async function getWebDaliRawSpectrum(label: string, bands: number) {
+  const snapshot = await invoke<string>("web_dali_audio_snapshot", { label, kind: "raw-spectrum", size: bands });
+  const parsed = JSON.parse(snapshot || "{}") as { ok?: boolean; values?: number[]; error?: string };
+  return parsed.ok && Array.isArray(parsed.values) ? parsed.values : [];
+}
+
+export async function getWebDaliRawPcm(label: string, samples: number) {
+  const snapshot = await invoke<string>("web_dali_audio_snapshot", { label, kind: "raw-pcm", size: samples });
   const parsed = JSON.parse(snapshot || "{}") as { ok?: boolean; values?: number[] };
   return parsed.ok && Array.isArray(parsed.values) ? parsed.values : [];
 }
 
-export async function getWebDaliRawPcm(samples: number) {
-  const snapshot = await invoke<string>("web_dali_audio_snapshot", { kind: "raw-pcm", size: samples });
-  const parsed = JSON.parse(snapshot || "{}") as { ok?: boolean; values?: number[] };
-  return parsed.ok && Array.isArray(parsed.values) ? parsed.values : [];
+export async function clearWebData(label: string, target: "cache" | "cookies" | "site-data" | "all") {
+  await invoke("clear_web_data", { label, target });
 }
 
-export async function clearWebData(target: "cache" | "cookies" | "site-data" | "all") {
-  await invoke("clear_web_data", { target });
-}
-
-export async function onWindowResize() {
+export async function onWindowResize(label: string) {
   const bounds = await getStableWebStageBounds();
 
   await invoke("update_webview_bounds_rect", {
+    label,
     x: bounds.x,
     y: bounds.y,
     width: bounds.width,
@@ -868,9 +1059,10 @@ export async function onWindowResize() {
   });
 }
 
-export async function setWebChromeVisibility(hidden: boolean) {
+export async function setWebChromeVisibility(label: string, hidden: boolean) {
   if (hidden) {
     await invoke("update_webview_bounds_rect", {
+      label,
       x: 0,
       y: 0,
       width: Math.max(1, window.innerWidth),
@@ -879,5 +1071,5 @@ export async function setWebChromeVisibility(hidden: boolean) {
     return;
   }
 
-  await onWindowResize();
+  await onWindowResize((window as any).__ardali_activeTabId || "");
 }

@@ -989,6 +989,7 @@ const state = {
     page: 'single',
     info: null,
     titleHint: '',
+    analysisRunId: 0,
     settings: {},
     jobs: new Map(),
     history: [],
@@ -1864,6 +1865,7 @@ function createOrUpdateJob(payload) {
 }
 
 async function analyze(titleHint = state.titleHint) {
+    const runId = ++state.analysisRunId;
     const url = normalizeDownloaderInputUrl(els.urlInput.value);
     if (!url) {
         setStatus('error', dlt('status.urlRequired'), dlt('status.urlRequiredDetail'));
@@ -1872,7 +1874,16 @@ async function analyze(titleHint = state.titleHint) {
     els.urlInput.value = url;
     setBusy(true);
     setStatus('busy', dlt('status.processing'), '');
-    const result = await api.getInfo(url);
+    let result;
+    try {
+        result = await api.getInfo(url);
+    } catch (error) {
+        if (runId !== state.analysisRunId) return;
+        setBusy(false);
+        setStatus('error', dlt('error.analysisFailed'), String(error?.message || error || dlt('common.unknownError')));
+        return;
+    }
+    if (runId !== state.analysisRunId) return;
     if (!result?.success) {
         setBusy(false);
         setStatus('error', dlt('error.analysisFailed'), result?.error || dlt('error.videoInfoFailed'));

@@ -2035,23 +2035,33 @@ unsafe extern "C" fn dsp_callback(
         return;
     }
     let engine = &mut *(user as *mut NativeAudioEngine);
-    
+
     let mut info = BassChannelInfo::default();
-    unsafe { BASS_ChannelGetInfo(channel, &mut info); }
-    let chans = if info.chans > 0 { info.chans as usize } else { 2 };
-    
+    unsafe {
+        BASS_ChannelGetInfo(channel, &mut info);
+    }
+    let chans = if info.chans > 0 {
+        info.chans as usize
+    } else {
+        2
+    };
+
     let frames = (length as usize / std::mem::size_of::<f32>() / chans) as c_int;
     if frames <= 0 {
         return;
     }
 
     let raw_floats = std::slice::from_raw_parts(buffer as *const f32, frames as usize * chans);
-    
+
     // We need to convert it to stereo for the visualizer to avoid out-of-bounds
     let mut stereo_samples = vec![0.0f32; frames as usize * 2];
     for i in 0..(frames as usize) {
         let left = raw_floats[i * chans];
-        let right = if chans > 1 { raw_floats[i * chans + 1] } else { left };
+        let right = if chans > 1 {
+            raw_floats[i * chans + 1]
+        } else {
+            left
+        };
         stereo_samples[i * 2] = left;
         stereo_samples[i * 2 + 1] = right;
     }
@@ -2060,7 +2070,8 @@ unsafe extern "C" fn dsp_callback(
 
     let Ok(_callback_guard) = CALLBACK_LOCK.try_lock() else {
         if engine.effects_enabled {
-            let samples = std::slice::from_raw_parts_mut(buffer as *mut f32, frames as usize * chans);
+            let samples =
+                std::slice::from_raw_parts_mut(buffer as *mut f32, frames as usize * chans);
             samples.fill(0.0);
             engine.update_visual_spectrum(&vec![0.0f32; frames as usize * 2], false);
         }
@@ -2076,10 +2087,15 @@ unsafe extern "C" fn dsp_callback(
         process_dsp(engine.dsp, buffer as *mut f32, frames, chans as i32);
     }
 
-    let processed_floats = std::slice::from_raw_parts(buffer as *const f32, frames as usize * chans);
+    let processed_floats =
+        std::slice::from_raw_parts(buffer as *const f32, frames as usize * chans);
     for i in 0..(frames as usize) {
         let left = processed_floats[i * chans];
-        let right = if chans > 1 { processed_floats[i * chans + 1] } else { left };
+        let right = if chans > 1 {
+            processed_floats[i * chans + 1]
+        } else {
+            left
+        };
         stereo_samples[i * 2] = left;
         stereo_samples[i * 2 + 1] = right;
     }
