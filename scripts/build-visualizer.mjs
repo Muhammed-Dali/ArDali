@@ -24,7 +24,7 @@ try {
   
   fs.copyFileSync(binPath, destPath);
   // Çalıştırılabilir izinleri ver
-  execSync(`chmod +x "${destPath}"`);
+  fs.chmodSync(destPath, 0o755);
   
   console.log("Dali-Visualizer başarıyla derlendi ve kopyalandı:", destPath);
 } catch (error) {
