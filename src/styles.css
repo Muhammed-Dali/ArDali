@@ -5897,6 +5897,120 @@ input:disabled {
   left: 20px !important;
 }
 
+.web-search-engine-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 32px;
+  min-width: 82px;
+  flex: 0 0 auto;
+  margin-right: 8px;
+  border: 1px solid var(--border-medium);
+  border-radius: 16px;
+  background: var(--bg-medium);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  overflow: hidden;
+}
+
+.web-search-engine-select-label {
+  max-width: 48px;
+  padding-right: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.web-search-engine-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.96);
+  object-fit: contain;
+  padding: 2px;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.web-search-engine-select .web-search-engine-icon {
+  margin-left: 10px;
+}
+
+.web-search-engine-select select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.web-search-engine-select:hover,
+.web-search-engine-select:focus-within {
+  border-color: var(--accent-primary);
+  background: var(--bg-lighter);
+}
+
+.web-search-engine-chips {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 640px;
+  min-height: 36px;
+  margin-top: 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.web-search-engine-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.web-search-engine-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 92px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-medium);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-medium) 86%, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.web-search-engine-chip small {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  background: rgba(29, 185, 84, 0.16);
+  color: #59d98e;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.web-search-engine-chip:hover,
+.web-search-engine-chip.active {
+  border-color: var(--accent-primary);
+  background: rgba(0, 200, 255, 0.12);
+  color: var(--accent-primary);
+}
+
 .search-autocomplete-dropdown {
   position: absolute;
   top: calc(100% + 4px);

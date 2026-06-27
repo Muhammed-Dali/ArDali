@@ -1065,7 +1065,10 @@ fn project_root_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
         }
     }
     if let Ok(resource_dir) = app.path().resource_dir() {
-        roots.push(resource_dir);
+        roots.push(resource_dir.clone());
+        if let Some(parent) = resource_dir.parent() {
+            roots.push(parent.to_path_buf());
+        }
     }
     roots
 }
@@ -1110,9 +1113,15 @@ fn find_visualizer_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
     }
     for root in project_root_candidates(app) {
         candidates.push(root.join(exe_name));
+        candidates.push(root.join(visualizer_platform_dir()).join(exe_name));
         candidates.push(
             root.join("_up_")
                 .join("native-dist")
+                .join(visualizer_platform_dir())
+                .join(exe_name),
+        );
+        candidates.push(
+            root.join("_up_")
                 .join(visualizer_platform_dir())
                 .join(exe_name),
         );
@@ -1138,6 +1147,23 @@ fn find_visualizer_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
                 .join(exe_name),
         );
         candidates.push(appdir.join("usr").join("lib").join(exe_name));
+        candidates.push(
+            appdir
+                .join("usr")
+                .join("lib")
+                .join("ardali-webmedia")
+                .join("native-dist")
+                .join(visualizer_platform_dir())
+                .join(exe_name),
+        );
+        candidates.push(
+            appdir
+                .join("usr")
+                .join("lib")
+                .join("ardali-webmedia")
+                .join(visualizer_platform_dir())
+                .join(exe_name),
+        );
         candidates.push(appdir.join("usr").join("bin").join(exe_name));
     }
     first_existing_path(candidates)
@@ -1359,9 +1385,28 @@ fn start_projectm_visualizer(
 
     #[cfg(target_os = "linux")]
     {
-        let mut library_path = working_dir.as_os_str().to_os_string();
+        let mut library_dirs = vec![working_dir.to_path_buf()];
+        for root in project_root_candidates(&app) {
+            library_dirs.push(root.join("lib"));
+            library_dirs.push(
+                root.join("_up_")
+                    .join("native-dist")
+                    .join(visualizer_platform_dir()),
+            );
+            library_dirs.push(root.join(visualizer_platform_dir()));
+        }
+
+        let mut library_path = std::ffi::OsString::new();
+        for dir in library_dirs.into_iter().filter(|dir| dir.exists()) {
+            if !library_path.is_empty() {
+                library_path.push(":");
+            }
+            library_path.push(dir);
+        }
         if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
-            library_path.push(":");
+            if !library_path.is_empty() {
+                library_path.push(":");
+            }
             library_path.push(existing);
         }
         command.env("LD_LIBRARY_PATH", library_path);

@@ -3,7 +3,7 @@ import { emit } from "@tauri-apps/api/event";
 export type WebAnimationMode = "compact" | "dock";
 export type WebMotionPreset = "calm" | "balanced" | "fast";
 export type WebUserAgentMode = "desktop" | "mobile" | "default";
-export type SearchEngine = "google" | "duckduckgo" | "bing";
+export type SearchEngine = "google" | "duckduckgo" | "brave" | "bing";
 export type WebAutoplayPolicy = "allow" | "gesture" | "block";
 export type AppLanguage = "tr-TR" | "ar-SA" | "en-US" | "es-ES";
 export type StartupPage = "music" | "video" | "gallery" | "web";
@@ -201,7 +201,7 @@ export function normalizeWebSettings(value: Partial<WebSettings> | null | undefi
     playbackCrossfadeManual: bool(raw.playbackCrossfadeManual, defaultWebSettings.playbackCrossfadeManual),
     playbackCrossfadeAuto: bool(raw.playbackCrossfadeAuto, defaultWebSettings.playbackCrossfadeAuto),
     playbackCrossfadeMs: numberInRange(raw.playbackCrossfadeMs, defaultWebSettings.playbackCrossfadeMs, 0, 15000),
-    searchEngine: oneOf(raw.searchEngine, ["google", "duckduckgo", "bing"] as const, defaultWebSettings.searchEngine),
+    searchEngine: oneOf(raw.searchEngine, ["google", "duckduckgo", "brave", "bing"] as const, defaultWebSettings.searchEngine),
     defaultPlatformId: typeof raw.defaultPlatformId === "string" && raw.defaultPlatformId.trim() ? raw.defaultPlatformId : defaultWebSettings.defaultPlatformId,
     rememberLastPlatform: bool(raw.rememberLastPlatform, defaultWebSettings.rememberLastPlatform),
     restoreLastSession: bool(raw.restoreLastSession, defaultWebSettings.restoreLastSession),

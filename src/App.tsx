@@ -60,7 +60,7 @@ import {
   setPluginInstalled,
   type ArdaliStoreItem,
 } from "./web/pluginManager";
-import { defaultWebSettings, loadWebSettings, resetWebSettings, saveWebSettings, WEB_SETTINGS_EVENT, type AppLanguage, type AppTheme, type StartupPage, type WebSettings } from "./web/webSettings";
+import { defaultWebSettings, loadWebSettings, resetWebSettings, saveWebSettings, WEB_SETTINGS_EVENT, type AppLanguage, type AppTheme, type SearchEngine, type StartupPage, type WebSettings } from "./web/webSettings";
 import { AboutWindow } from "./AboutWindow";
 import { TabBar } from "./TabBar";
 
@@ -71,6 +71,20 @@ type PageId =
   | "gallery"
   | "web"
   | "settings";
+
+const webSearchEngines: Array<{ id: SearchEngine; label: string; shortLabel: string; iconSrc: string; privacy?: boolean }> = [
+  { id: "duckduckgo", label: "DuckDuckGo", shortLabel: "DDG", iconSrc: "https://duckduckgo.com/favicon.ico" },
+  { id: "brave", label: "Brave", shortLabel: "Brave", iconSrc: "https://brave.com/static-assets/images/brave-logo-sans-text.svg", privacy: true },
+  { id: "google", label: "Google", shortLabel: "Google", iconSrc: "https://www.google.com/favicon.ico" },
+  { id: "bing", label: "Bing", shortLabel: "Bing", iconSrc: "https://www.bing.com/favicon.ico" },
+];
+
+function buildSearchEngineUrl(engine: SearchEngine, encodedQuery: string) {
+  if (engine === "google") return `https://www.google.com/search?q=${encodedQuery}`;
+  if (engine === "bing") return `https://www.bing.com/search?q=${encodedQuery}`;
+  if (engine === "brave") return `https://search.brave.com/search?q=${encodedQuery}`;
+  return `https://html.duckduckgo.com/html/?q=${encodedQuery}`;
+}
 
 type ResizeDirection =
   | "East"
@@ -3717,9 +3731,11 @@ function SettingsWindow() {
                   <span>{text("settings.web.searchEngineHint")}</span>
                 </div>
                 <select value={draft.searchEngine || "duckduckgo"} onChange={(event) => updateDraft("searchEngine", event.target.value as any)}>
-                  <option value="duckduckgo">DuckDuckGo</option>
-                  <option value="google">Google</option>
-                  <option value="bing">Bing</option>
+                  {webSearchEngines.map((engine) => (
+                    <option key={engine.id} value={engine.id}>
+                      {engine.label}
+                    </option>
+                  ))}
                 </select>
               </div>
 
@@ -6758,9 +6774,7 @@ export function App() {
     } else {
       const engine = webSettings.searchEngine || "duckduckgo";
       const encodedQuery = encodeURIComponent(query);
-      if (engine === "google") url = `https://www.google.com/search?q=${encodedQuery}`;
-      else if (engine === "bing") url = `https://www.bing.com/search?q=${encodedQuery}`;
-      else url = `https://duckduckgo.com/?q=${encodedQuery}`;
+      url = buildSearchEngineUrl(engine, encodedQuery);
     }
 
     let targetPlatformId = "custom";
@@ -6808,6 +6822,12 @@ export function App() {
     
     (document.activeElement as HTMLElement)?.blur();
   }, [webSettings.searchEngine, openPlatform, activeTabId, scheduleWebviewBoundsSync, tabs]);
+
+  const updateSearchEngine = useCallback((searchEngine: SearchEngine) => {
+    const nextSettings = { ...webSettings, searchEngine };
+    setWebSettings(nextSettings);
+    saveWebSettings(nextSettings);
+  }, [webSettings]);
 
   const handleOpenPinnedSite = useCallback(async (site: WebPinnedSite) => {
     const existingTab = tabs.find((tab) => tabHostname(tab.url) === site.host);
@@ -8530,6 +8550,8 @@ export function App() {
     return <main className="app-boot-screen" aria-hidden="true" />;
   }
 
+  const activeSearchEngine = webSearchEngines.find((engine) => engine.id === webSettings.searchEngine) ?? webSearchEngines[0];
+
   return (
     <main className={`app-shell ${railCollapsed ? "rail-collapsed" : ""} ${page === "web" ? "web-mode" : ""} ${webChromeHidden ? "web-chrome-hidden" : ""} web-motion-${webSettings.motionPreset} web-animation-${webSettings.animationMode} ${webSettings.lowPowerMode ? "web-low-power" : ""}`}>
 
@@ -9000,6 +9022,28 @@ export function App() {
 
               {/* RIGHT: Search bar and new tab */}
               <div className="web-search-form" style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
+                <label className="web-search-engine-select compact" title={activeSearchEngine.label}>
+                  <img
+                    className="web-search-engine-icon"
+                    src={activeSearchEngine.iconSrc}
+                    alt=""
+                    onError={(event) => {
+                      if (activeSearchEngine.id === "brave") event.currentTarget.src = "https://brave.com/static-assets/images/brave-logo-sans-text.svg";
+                    }}
+                  />
+                  <span className="web-search-engine-select-label">{activeSearchEngine.shortLabel}</span>
+                  <select
+                    value={activeSearchEngine.id}
+                    aria-label="Arama motoru"
+                    onChange={(event) => updateSearchEngine(event.target.value as SearchEngine)}
+                  >
+                    {webSearchEngines.map((engine) => (
+                      <option key={engine.id} value={engine.id}>
+                        {engine.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <SearchAutocomplete
                   searchEngine={webSettings.searchEngine || "duckduckgo"}
                   onSearch={(q) => void handleWebSearchQuery(q)}
@@ -9199,13 +9243,37 @@ export function App() {
                 autoFocus={true}
                 icon={<img src="/icons/app/ardali_256.png" alt="ArDli Logo" style={{ width: "24px", height: "24px", borderRadius: "6px" }} />}
               />
+              <div className="web-search-engine-chips" role="radiogroup" aria-label="Arama motoru">
+                {webSearchEngines.map((engine) => (
+                  <button
+                    key={engine.id}
+                    type="button"
+                    className={`web-search-engine-chip ${activeSearchEngine.id === engine.id ? "active" : ""}`}
+                    onClick={() => updateSearchEngine(engine.id)}
+                    role="radio"
+                    aria-checked={activeSearchEngine.id === engine.id}
+                    title={engine.label}
+                  >
+                    <img
+                      className="web-search-engine-icon"
+                      src={engine.iconSrc}
+                      alt=""
+                      onError={(event) => {
+                        if (engine.id === "brave") event.currentTarget.src = "https://brave.com/static-assets/images/brave-logo-sans-text.svg";
+                      }}
+                    />
+                    <span>{engine.label}</span>
+                    {engine.privacy ? <small>Gizlilik</small> : null}
+                  </button>
+                ))}
+              </div>
               <div className="web-shortcuts-grid" style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))",
                 gap: "16px",
                 width: "100%",
                 maxWidth: "640px",
-                marginTop: "48px",
+                marginTop: "34px",
                 justifyContent: "center"
               }}>
                 <div className="web-shortcuts-title">
