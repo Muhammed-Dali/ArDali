@@ -1064,11 +1064,23 @@ fn project_root_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
             roots.push(parent.to_path_buf());
         }
     }
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            roots.push(exe_dir.to_path_buf());
+            if let Some(parent) = exe_dir.parent() {
+                roots.push(parent.to_path_buf());
+            }
+        }
+    }
     if let Ok(resource_dir) = app.path().resource_dir() {
         roots.push(resource_dir.clone());
         if let Some(parent) = resource_dir.parent() {
             roots.push(parent.to_path_buf());
         }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        roots.push(PathBuf::from("/opt/ardali-webmedia"));
     }
     roots
 }
@@ -1091,7 +1103,7 @@ fn visualizer_platform_dir() -> &'static str {
     }
 }
 
-fn find_visualizer_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
+fn visualizer_executable_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
     let exe_name = visualizer_exe_name();
     let mut candidates = Vec::new();
     if let Ok(path) = app.path().resolve(exe_name, BaseDirectory::Resource) {
@@ -1166,10 +1178,14 @@ fn find_visualizer_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
         );
         candidates.push(appdir.join("usr").join("bin").join(exe_name));
     }
-    first_existing_path(candidates)
+    candidates
 }
 
-fn find_visualizer_presets(app: &tauri::AppHandle) -> Option<PathBuf> {
+fn find_visualizer_executable(app: &tauri::AppHandle) -> Option<PathBuf> {
+    first_existing_path(visualizer_executable_candidates(app))
+}
+
+fn visualizer_preset_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(path) = app
         .path()
@@ -1200,7 +1216,19 @@ fn find_visualizer_presets(app: &tauri::AppHandle) -> Option<PathBuf> {
                 .join("visualizer-presets"),
         );
     }
-    first_existing_path(candidates)
+    candidates
+}
+
+fn find_visualizer_presets(app: &tauri::AppHandle) -> Option<PathBuf> {
+    first_existing_path(visualizer_preset_candidates(app))
+}
+
+fn format_missing_paths_message(title: &str, candidates: Vec<PathBuf>) -> String {
+    let searched = candidates
+        .into_iter()
+        .map(|path| format!("\n- {}", path.display()))
+        .collect::<String>();
+    format!("{title}\nAranan yollar:{searched}")
 }
 
 #[cfg(target_os = "linux")]
@@ -1353,14 +1381,21 @@ fn start_projectm_visualizer(
     }
 
     let mut exe = find_visualizer_executable(&app).ok_or_else(|| {
-        "ProjectM binary bulunamadi. Once `npm run visualizer:build` calistirin.".to_string()
+        format_missing_paths_message(
+            "ProjectM binary bulunamadi. Once `npm run visualizer:build` calistirin.",
+            visualizer_executable_candidates(&app),
+        )
     })?;
     #[cfg(target_os = "linux")]
     {
         exe = prepare_visualizer_executable(&app, &exe)?;
     }
-    let presets = find_visualizer_presets(&app)
-        .ok_or_else(|| "ProjectM milk preset klasoru bulunamadi.".to_string())?;
+    let presets = find_visualizer_presets(&app).ok_or_else(|| {
+        format_missing_paths_message(
+            "ProjectM milk preset klasoru bulunamadi.",
+            visualizer_preset_candidates(&app),
+        )
+    })?;
     let working_dir = exe.parent().unwrap_or_else(|| Path::new("."));
 
     let mut command = Command::new(&exe);
